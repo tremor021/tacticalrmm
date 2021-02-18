@@ -299,7 +299,7 @@ printf >&2 "${GREEN}Starting ${i} service${NC}\n"
 sudo systemctl start ${i}
 done
 
-CURRENT_MESH_VER=$(cd /meshcentral && npm list meshcentral | grep 'meshcentral@' | awk -F'[@]' '{print $2}' | tr -d " \t")
+CURRENT_MESH_VER=$(cd /meshcentral/node_modules/meshcentral && node -p -e "require('./package.json').version")
 if [[ "${CURRENT_MESH_VER}" != "${LATEST_MESH_VER}" ]]; then
   printf >&2 "${GREEN}Updating meshcentral from ${CURRENT_MESH_VER} to ${LATEST_MESH_VER}${NC}\n"
   sudo systemctl stop meshcentral
