@@ -1,0 +1,8 @@
+coverage
+model_bakery
+black
+pytest
+pytest-django
+pytest-xdist
+pytest-cov
+codecov

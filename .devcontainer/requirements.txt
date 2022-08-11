@@ -1,0 +1,3 @@
+-r /workspace/api/tacticalrmm/requirements.txt
+-r /workspace/api/tacticalrmm/requirements-dev.txt
+-r /workspace/api/tacticalrmm/requirements-test.txt
