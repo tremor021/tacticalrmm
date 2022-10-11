@@ -33,7 +33,7 @@ meshSystemBin="${meshDir}/meshagent"
 meshSvcName='meshagent.service'
 meshSysD="/lib/systemd/system/${meshSvcName}"
 
-deb=(ubuntu debian raspbian kali linuxmint)
+deb=(ubuntu debian raspbian kali linuxmint zorin)
 rhe=(fedora rocky centos rhel amzn arch opensuse)
 
 set_locale_deb() {
@@ -78,21 +78,21 @@ InstallMesh() {
 
     meshTmpDir=$(mktemp -d -t "mesh-XXXXXXXXX")
     if [ $? -ne 0 ]; then
-        meshTmpDir='meshtemp'
+        meshTmpDir='/root/meshtemp'
         mkdir -p ${meshTmpDir}
     fi
     meshTmpBin="${meshTmpDir}/meshagent"
     wget --no-check-certificate -q -O ${meshTmpBin} ${meshDL}
     chmod +x ${meshTmpBin}
     mkdir -p ${meshDir}
-    env LC_ALL=en_US.UTF-8 LANGUAGE=en_US ${meshTmpBin} -install --installPath=${meshDir}
+    env LC_ALL=en_US.UTF-8 LANGUAGE=en_US XAUTHORITY=foo DISPLAY=bar ${meshTmpBin} -install --installPath=${meshDir}
     sleep 1
     rm -rf ${meshTmpDir}
 }
 
 RemoveMesh() {
     if [ -f "${meshSystemBin}" ]; then
-        ${meshSystemBin} -uninstall
+        env XAUTHORITY=foo DISPLAY=bar ${meshSystemBin} -uninstall
         sleep 1
     fi
 
@@ -133,7 +133,7 @@ else
     InstallMesh
     sleep 2
     echo "Getting mesh node id..."
-    MESH_NODE_ID=$(${agentBin} -m nixmeshnodeid)
+    MESH_NODE_ID=$(env XAUTHORITY=foo DISPLAY=bar ${agentBin} -m nixmeshnodeid)
 fi
 
 if [ ! -d "${agentBinPath}" ]; then

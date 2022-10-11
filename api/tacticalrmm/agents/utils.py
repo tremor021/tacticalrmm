@@ -1,6 +1,7 @@
 import asyncio
 import tempfile
 import urllib.parse
+from pathlib import Path
 
 from django.conf import settings
 from django.http import FileResponse
@@ -51,12 +52,10 @@ def generate_linux_install(
     uri = get_mesh_ws_url()
     mesh_id = asyncio.run(get_mesh_device_id(uri, core.mesh_device_group))
     mesh_dl = (
-        f"{core.mesh_site}/meshagents?id={mesh_id}&installflags=0&meshinstall={arch_id}"
+        f"{core.mesh_site}/meshagents?id={mesh_id}&installflags=2&meshinstall={arch_id}"
     )
 
-    sh = settings.LINUX_AGENT_SCRIPT
-    with open(sh, "r") as f:
-        text = f.read()
+    text = Path(settings.LINUX_AGENT_SCRIPT).read_text()
 
     replace = {
         "agentDLChange": download_url,

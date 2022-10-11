@@ -4,6 +4,7 @@ import os
 import random
 import string
 import time
+from pathlib import Path
 
 from django.conf import settings
 from django.db.models import Count, Exists, OuterRef, Prefetch, Q
@@ -32,6 +33,7 @@ from tacticalrmm.constants import (
     AGENT_DEFER,
     AGENT_STATUS_OFFLINE,
     AGENT_STATUS_ONLINE,
+    AGENT_TABLE_DEFER,
     AgentHistoryType,
     AgentMonType,
     AgentPlat,
@@ -115,7 +117,7 @@ class GetAgents(APIView):
                 Agent.objects.filter_by_role(request.user)  # type: ignore
                 .filter(monitoring_type_filter)
                 .filter(client_site_filter)
-                .defer(*AGENT_DEFER)
+                .defer(*AGENT_TABLE_DEFER)
                 .select_related(
                     "site__server_policy",
                     "site__workstation_policy",
@@ -171,6 +173,9 @@ class GetUpdateDeleteAgent(APIView):
         class Meta:
             model = Agent
             fields = [
+                "maintenance_mode",  # TODO separate this
+                "policy",  # TODO separate this
+                "block_policy_inheritance",  # TODO separate this
                 "monitoring_type",
                 "description",
                 "overdue_email_alert",
@@ -233,10 +238,11 @@ class GetUpdateDeleteAgent(APIView):
     def delete(self, request, agent_id):
         agent = get_object_or_404(Agent, agent_id=agent_id)
 
-        code = "foo"
+        code = "foo"  # stub for windows
         if agent.plat == AgentPlat.LINUX:
-            with open(settings.LINUX_AGENT_SCRIPT, "r") as f:
-                code = f.read()
+            code = Path(settings.LINUX_AGENT_SCRIPT).read_text()
+        elif agent.plat == AgentPlat.DARWIN:
+            code = Path(settings.MAC_UNINSTALL).read_text()
 
         asyncio.run(agent.nats_cmd({"func": "uninstall", "code": code}, wait=False))
         name = agent.hostname
@@ -248,7 +254,7 @@ class GetUpdateDeleteAgent(APIView):
             asyncio.run(remove_mesh_agent(uri, mesh_id))
         except Exception as e:
             DebugLog.error(
-                message=f"Unable to remove agent {name} from meshcentral database: {str(e)}",
+                message=f"Unable to remove agent {name} from meshcentral database: {e}",
                 log_type=DebugLogType.AGENT_ISSUES,
             )
         return Response(f"{name} will now be uninstalled.")
@@ -266,7 +272,7 @@ class AgentProcesses(APIView):
 
         agent = get_object_or_404(Agent, agent_id=agent_id)
         r = asyncio.run(agent.nats_cmd(data={"func": "procs"}, timeout=5))
-        if r == "timeout" or r == "natsdown":
+        if r in ("timeout", "natsdown"):
             return notify_error("Unable to contact the agent")
         return Response(r)
 
@@ -277,7 +283,7 @@ class AgentProcesses(APIView):
             agent.nats_cmd({"func": "killproc", "procpid": int(pid)}, timeout=15)
         )
 
-        if r == "timeout" or r == "natsdown":
+        if r in ("timeout", "natsdown"):
             return notify_error("Unable to contact the agent")
         elif r != "ok":
             return notify_error(r)
@@ -409,7 +415,7 @@ def get_event_log(request, agent_id, logtype, days):
         },
     }
     r = asyncio.run(agent.nats_cmd(data, timeout=timeout + 2))
-    if r == "timeout" or r == "natsdown":
+    if r in ("timeout", "natsdown"):
         return notify_error("Unable to contact the agent")
 
     return Response(r)
@@ -547,7 +553,15 @@ def install_agent(request):
 
     codesign_token, is_valid = token_is_valid()
 
-    inno = f"tacticalagent-v{version}-{plat}-{goarch}.exe"
+    if request.data["installMethod"] in {"bash", "mac"} and not is_valid:
+        return notify_error(
+            "Missing code signing token, or token is no longer valid. Please read the docs for more info."
+        )
+
+    inno = f"tacticalagent-v{version}-{plat}-{goarch}"
+    if plat == AgentPlat.WINDOWS:
+        inno += ".exe"
+
     download_url = get_agent_url(goarch=goarch, plat=plat, token=codesign_token)
 
     installer_user = User.objects.filter(is_installer_user=True).first()
@@ -555,6 +569,21 @@ def install_agent(request):
     _, token = AuthToken.objects.create(
         user=installer_user, expiry=dt.timedelta(hours=request.data["expires"])
     )
+
+    install_flags = [
+        "-m",
+        "install",
+        "--api",
+        request.data["api"],
+        "--client-id",
+        client_id,
+        "--site-id",
+        site_id,
+        "--agent-type",
+        request.data["agenttype"],
+        "--auth",
+        token,
+    ]
 
     if request.data["installMethod"] == "exe":
         from tacticalrmm.utils import generate_winagent_exe
@@ -573,14 +602,6 @@ def install_agent(request):
         )
 
     elif request.data["installMethod"] == "bash":
-        # TODO
-        # linux agents are in beta for now, only available for sponsors for testing
-        # remove this after it's out of beta
-
-        if not is_valid:
-            return notify_error(
-                "Missing code signing token, or token is no longer valid. Please read the docs for more info."
-            )
 
         from agents.utils import generate_linux_install
 
@@ -594,52 +615,45 @@ def install_agent(request):
             download_url=download_url,
         )
 
-    elif request.data["installMethod"] == "manual":
-        cmd = [
-            inno,
-            "/VERYSILENT",
-            "/SUPPRESSMSGBOXES",
-            "&&",
-            "ping",
-            "127.0.0.1",
-            "-n",
-            "5",
-            "&&",
-            r'"C:\Program Files\TacticalAgent\tacticalrmm.exe"',
-            "-m",
-            "install",
-            "--api",
-            request.data["api"],
-            "--client-id",
-            client_id,
-            "--site-id",
-            site_id,
-            "--agent-type",
-            request.data["agenttype"],
-            "--auth",
-            token,
-        ]
+    elif request.data["installMethod"] in {"manual", "mac"}:
+        resp = {}
+        if request.data["installMethod"] == "manual":
+            cmd = [
+                inno,
+                "/VERYSILENT",
+                "/SUPPRESSMSGBOXES",
+                "&&",
+                "ping",
+                "127.0.0.1",
+                "-n",
+                "5",
+                "&&",
+                r'"C:\Program Files\TacticalAgent\tacticalrmm.exe"',
+            ] + install_flags
 
-        if int(request.data["rdp"]):
-            cmd.append("--rdp")
-        if int(request.data["ping"]):
-            cmd.append("--ping")
-        if int(request.data["power"]):
-            cmd.append("--power")
+            if int(request.data["rdp"]):
+                cmd.append("--rdp")
+            if int(request.data["ping"]):
+                cmd.append("--ping")
+            if int(request.data["power"]):
+                cmd.append("--power")
 
-        resp = {
-            "cmd": " ".join(str(i) for i in cmd),
-            "url": download_url,
-        }
+            resp["cmd"] = " ".join(str(i) for i in cmd)
+        else:
+            install_flags.insert(0, f"sudo ./{inno}")
+            cmd = install_flags.copy()
+            dl = f"curl -L -o {inno} '{download_url}'"
+            resp["cmd"] = (
+                dl + f" && chmod +x {inno} && " + " ".join(str(i) for i in cmd)
+            )
+
+        resp["url"] = download_url
 
         return Response(resp)
 
     elif request.data["installMethod"] == "powershell":
 
-        ps = os.path.join(settings.BASE_DIR, "core/installer.ps1")
-
-        with open(ps, "r") as f:
-            text = f.read()
+        text = Path(settings.BASE_DIR / "core" / "installer.ps1").read_text()
 
         replace_dict = {
             "innosetupchange": inno,
@@ -666,8 +680,7 @@ def install_agent(request):
             except Exception as e:
                 DebugLog.error(message=str(e))
 
-        with open(ps1, "w") as f:
-            f.write(text)
+        Path(ps1).write_text(text)
 
         if settings.DEBUG:
             with open(ps1, "r") as f:
@@ -909,6 +922,8 @@ def bulk(request):
         q = q.filter(plat=AgentPlat.WINDOWS)
     elif request.data["osType"] == AgentPlat.LINUX:
         q = q.filter(plat=AgentPlat.LINUX)
+    elif request.data["osType"] == AgentPlat.DARWIN:
+        q = q.filter(plat=AgentPlat.DARWIN)
 
     agents: list[int] = [agent.pk for agent in q]
 
@@ -994,10 +1009,10 @@ def agent_maintenance(request):
     if count:
         action = "disabled" if not request.data["action"] else "enabled"
         return Response(f"Maintenance mode has been {action} on {count} agents")
-    else:
-        return Response(
-            f"No agents have been put in maintenance mode. You might not have permissions to the resources."
-        )
+
+    return Response(
+        f"No agents have been put in maintenance mode. You might not have permissions to the resources."
+    )
 
 
 @api_view(["GET"])

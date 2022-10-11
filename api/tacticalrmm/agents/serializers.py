@@ -90,26 +90,31 @@ class AgentTableSerializer(serializers.ModelSerializer):
     last_seen = serializers.ReadOnlyField()
     pending_actions_count = serializers.ReadOnlyField()
     has_patches_pending = serializers.ReadOnlyField()
+    cpu_model = serializers.ReadOnlyField()
+    graphics = serializers.ReadOnlyField()
+    local_ips = serializers.ReadOnlyField()
+    make_model = serializers.ReadOnlyField()
+    physical_disks = serializers.ReadOnlyField()
 
     def get_alert_template(self, obj):
 
         if not obj.alert_template:
             return None
-        else:
-            return {
-                "name": obj.alert_template.name,
-                "always_email": obj.alert_template.agent_always_email,
-                "always_text": obj.alert_template.agent_always_text,
-                "always_alert": obj.alert_template.agent_always_alert,
-            }
+
+        return {
+            "name": obj.alert_template.name,
+            "always_email": obj.alert_template.agent_always_email,
+            "always_text": obj.alert_template.agent_always_text,
+            "always_alert": obj.alert_template.agent_always_alert,
+        }
 
     def get_logged_username(self, obj) -> str:
         if obj.logged_in_username == "None" and obj.status == AGENT_STATUS_ONLINE:
             return obj.last_logged_in_user
         elif obj.logged_in_username != "None":
             return obj.logged_in_username
-        else:
-            return "-"
+
+        return "-"
 
     def get_italic(self, obj) -> bool:
         return obj.logged_in_username == "None" and obj.status == AGENT_STATUS_ONLINE
@@ -141,6 +146,14 @@ class AgentTableSerializer(serializers.ModelSerializer):
             "plat",
             "goarch",
             "has_patches_pending",
+            "version",
+            "operating_system",
+            "public_ip",
+            "cpu_model",
+            "graphics",
+            "local_ips",
+            "make_model",
+            "physical_disks",
         ]
         depth = 2
 

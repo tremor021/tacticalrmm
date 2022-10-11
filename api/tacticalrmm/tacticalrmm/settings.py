@@ -1,4 +1,5 @@
 import os
+from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path
 
@@ -14,29 +15,31 @@ EXE_DIR = os.path.join(BASE_DIR, "tacticalrmm/private/exe")
 
 LINUX_AGENT_SCRIPT = BASE_DIR / "core" / "agent_linux.sh"
 
+MAC_UNINSTALL = BASE_DIR / "core" / "mac_uninstall.sh"
+
 AUTH_USER_MODEL = "accounts.User"
 
 # latest release
-TRMM_VERSION = "0.14.7-dev"
+TRMM_VERSION = "0.15.0"
 
 # https://github.com/amidaware/tacticalrmm-web
-WEB_VERSION = "0.100.8"
+WEB_VERSION = "0.101.0"
 
 # bump this version everytime vue code is changed
 # to alert user they need to manually refresh their browser
-APP_VER = "0.0.169"
+APP_VER = "0.0.171"
 
 # https://github.com/amidaware/rmmagent
-LATEST_AGENT_VER = "2.3.0"
+LATEST_AGENT_VER = "2.4.0"
 
-MESH_VER = "1.0.60"
+MESH_VER = "1.0.85"
 
-NATS_SERVER_VER = "2.8.4"
+NATS_SERVER_VER = "2.9.1"
 
 # for the update script, bump when need to recreate venv
-PIP_VER = "31"
+PIP_VER = "32"
 
-SETUPTOOLS_VER = "62.6.0"
+SETUPTOOLS_VER = "65.2.0"
 WHEEL_VER = "0.37.1"
 
 AGENT_BASE_URL = "https://agents.tacticalrmm.com"
@@ -71,10 +74,8 @@ HOSTED = False
 SWAGGER_ENABLED = False
 REDIS_HOST = "127.0.0.1"
 
-try:
+with suppress(ImportError):
     from .local_settings import *
-except ImportError:
-    pass
 
 if "GHACTIONS" in os.environ:
     DEBUG = False

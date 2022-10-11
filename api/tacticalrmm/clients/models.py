@@ -70,11 +70,11 @@ class Client(BaseAuditModel):
             sites = self.sites.all()
             if old_client.workstation_policy != self.workstation_policy:
                 for site in sites:
-                    cache.delete_many_pattern(f"site_workstation_{site.pk}_*")
+                    cache.delete_many_pattern(f"site_workstation_*{site.pk}_*")
 
             if old_client.server_policy != self.server_policy:
                 for site in sites:
-                    cache.delete_many_pattern(f"site_server_{site.pk}_*")
+                    cache.delete_many_pattern(f"site_server_*{site.pk}_*")
 
     class Meta:
         ordering = ("name",)
@@ -145,10 +145,10 @@ class Site(BaseAuditModel):
                 cache_agents_alert_template.delay()
 
             if old_site.workstation_policy != self.workstation_policy:
-                cache.delete_many_pattern(f"site_workstation_{self.pk}_*")
+                cache.delete_many_pattern(f"site_workstation_*{self.pk}_*")
 
             if old_site.server_policy != self.server_policy:
-                cache.delete_many_pattern(f"site_server_{self.pk}_*")
+                cache.delete_many_pattern(f"site_server_*{self.pk}_*")
 
     class Meta:
         ordering = ("name",)
@@ -229,16 +229,16 @@ class ClientCustomField(models.Model):
             return self.multiple_value
         elif self.field.type == CustomFieldType.CHECKBOX:
             return self.bool_value
-        else:
-            return self.string_value
+
+        return self.string_value
 
     def save_to_field(self, value):
-        if self.field.type in [
+        if self.field.type in (
             CustomFieldType.TEXT,
             CustomFieldType.NUMBER,
             CustomFieldType.SINGLE,
             CustomFieldType.DATETIME,
-        ]:
+        ):
             self.string_value = value
             self.save()
         elif self.field.type == CustomFieldType.MULTIPLE:
@@ -280,16 +280,16 @@ class SiteCustomField(models.Model):
             return self.multiple_value
         elif self.field.type == CustomFieldType.CHECKBOX:
             return self.bool_value
-        else:
-            return self.string_value
+
+        return self.string_value
 
     def save_to_field(self, value):
-        if self.field.type in [
+        if self.field.type in (
             CustomFieldType.TEXT,
             CustomFieldType.NUMBER,
             CustomFieldType.SINGLE,
             CustomFieldType.DATETIME,
-        ]:
+        ):
             self.string_value = value
             self.save()
         elif self.field.type == CustomFieldType.MULTIPLE:

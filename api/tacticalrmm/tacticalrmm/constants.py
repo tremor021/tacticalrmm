@@ -10,6 +10,7 @@ class MeshAgentIdent(Enum):
     LINUX64 = 6
     LINUX_ARM_64 = 26
     LINUX_ARM_HF = 25
+    DARWIN_UNIVERSAL = 10005
 
     def __str__(self):
         return str(self.value)
@@ -233,6 +234,14 @@ class DebugLogType(models.TextChoices):
 # Agent db fields that are not needed for most queries, speeds up query
 AGENT_DEFER = (
     "wmi_detail",
+    "services",
+    "created_by",
+    "created_time",
+    "modified_by",
+    "modified_time",
+)
+
+AGENT_TABLE_DEFER = (
     "services",
     "created_by",
     "created_time",
