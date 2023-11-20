@@ -13,6 +13,7 @@ from django.http import FileResponse
 from meshctrl.utils import get_auth_token
 
 from tacticalrmm.constants import (
+    AGENT_TBL_PEND_ACTION_CNT_CACHE_PREFIX,
     CORESETTINGS_CACHE_KEY,
     ROLE_CACHE_PREFIX,
     AgentPlat,
@@ -20,7 +21,7 @@ from tacticalrmm.constants import (
 )
 
 if TYPE_CHECKING:
-    from core.models import CodeSignToken, CoreSettings
+    from core.models import CoreSettings
 
 
 class CoreSettingsNotFound(Exception):
@@ -29,6 +30,7 @@ class CoreSettingsNotFound(Exception):
 
 def clear_entire_cache() -> None:
     cache.delete_many_pattern(f"{ROLE_CACHE_PREFIX}*")
+    cache.delete_many_pattern(f"{AGENT_TBL_PEND_ACTION_CNT_CACHE_PREFIX}*")
     cache.delete(CORESETTINGS_CACHE_KEY)
     cache.delete_many_pattern("site_*")
     cache.delete_many_pattern("agent_*")
@@ -51,6 +53,16 @@ def token_is_valid() -> tuple[str, bool]:
         return t.token, True
 
     return "", False
+
+
+def token_is_expired() -> bool:
+    from core.models import CodeSignToken
+
+    t: "CodeSignToken" = CodeSignToken.objects.first()
+    if not t or not t.token:
+        return False
+
+    return t.is_expired
 
 
 def get_core_settings() -> "CoreSettings":
@@ -76,8 +88,12 @@ def get_mesh_ws_url() -> str:
     if settings.DOCKER_BUILD:
         uri = f"{settings.MESH_WS_URL}/control.ashx?auth={token}"
     else:
-        site = core.mesh_site.replace("https", "wss")
-        uri = f"{site}/control.ashx?auth={token}"
+        if getattr(settings, "TRMM_INSECURE", False):
+            site = core.mesh_site.replace("https", "ws")
+            uri = f"{site}:4430/control.ashx?auth={token}"
+        else:
+            site = core.mesh_site.replace("https", "wss")
+            uri = f"{site}/control.ashx?auth={token}"
 
     return uri
 
@@ -130,6 +146,20 @@ async def send_command_with_mesh(
         )
 
 
+async def wake_on_lan(*, uri: str, mesh_node_id: str) -> None:
+    node_id = _b64_to_hex(mesh_node_id)
+    async with websockets.connect(uri) as ws:
+        await ws.send(
+            json.dumps(
+                {
+                    "action": "wakedevices",
+                    "nodeids": [f"node//{node_id}"],
+                    "responseid": "trmm",
+                }
+            )
+        )
+
+
 async def remove_mesh_agent(uri: str, mesh_node_id: str) -> None:
     node_id = _b64_to_hex(mesh_node_id)
     async with websockets.connect(uri) as ws:
@@ -153,9 +183,10 @@ def sysd_svc_is_running(svc: str) -> bool:
 def get_meshagent_url(
     *, ident: "MeshAgentIdent", plat: str, mesh_site: str, mesh_device_id: str
 ) -> str:
-
     if settings.DOCKER_BUILD:
         base = settings.MESH_WS_URL.replace("ws://", "http://")
+    elif getattr(settings, "TRMM_INSECURE", False):
+        base = mesh_site.replace("https", "http") + ":4430"
     else:
         base = mesh_site
 

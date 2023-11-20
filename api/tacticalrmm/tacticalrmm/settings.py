@@ -20,32 +20,29 @@ MAC_UNINSTALL = BASE_DIR / "core" / "mac_uninstall.sh"
 AUTH_USER_MODEL = "accounts.User"
 
 # latest release
-TRMM_VERSION = "0.15.0"
+TRMM_VERSION = "0.17.2-dev"
 
 # https://github.com/amidaware/tacticalrmm-web
-WEB_VERSION = "0.101.0"
+WEB_VERSION = "0.101.35"
 
 # bump this version everytime vue code is changed
 # to alert user they need to manually refresh their browser
-APP_VER = "0.0.171"
+APP_VER = "0.0.187"
 
 # https://github.com/amidaware/rmmagent
-LATEST_AGENT_VER = "2.4.0"
+LATEST_AGENT_VER = "2.5.0"
 
-MESH_VER = "1.0.85"
+MESH_VER = "1.1.9"
 
-NATS_SERVER_VER = "2.9.1"
+NATS_SERVER_VER = "2.10.4"
 
 # for the update script, bump when need to recreate venv
-PIP_VER = "32"
+PIP_VER = "39"
 
-SETUPTOOLS_VER = "65.2.0"
-WHEEL_VER = "0.37.1"
+SETUPTOOLS_VER = "68.2.2"
+WHEEL_VER = "0.41.3"
 
 AGENT_BASE_URL = "https://agents.tacticalrmm.com"
-CHECK_TOKEN_URL = f"{AGENT_BASE_URL}/api/v2/checktoken"
-AGENTS_URL = f"{AGENT_BASE_URL}/api/v2/agents/?"
-EXE_GEN_URL = f"{AGENT_BASE_URL}/api/v2/exe"
 
 DEFAULT_AUTO_FIELD = "django.db.models.AutoField"
 
@@ -73,9 +70,16 @@ ADMIN_ENABLED = False
 HOSTED = False
 SWAGGER_ENABLED = False
 REDIS_HOST = "127.0.0.1"
+TRMM_LOG_LEVEL = "ERROR"
 
 with suppress(ImportError):
-    from .local_settings import *
+    from .local_settings import *  # noqa
+
+CHECK_TOKEN_URL = f"{AGENT_BASE_URL}/api/v2/checktoken"
+AGENTS_URL = f"{AGENT_BASE_URL}/api/v2/agents/?"
+EXE_GEN_URL = f"{AGENT_BASE_URL}/api/v2/exe"
+REPORTING_CHECK_URL = f"{AGENT_BASE_URL}/api/v2/reporting/check"
+REPORTING_DL_URL = f"{AGENT_BASE_URL}/api/v2/reporting/download/?"
 
 if "GHACTIONS" in os.environ:
     DEBUG = False
@@ -128,6 +132,7 @@ INSTALLED_APPS = [
     "logs",
     "scripts",
     "alerts",
+    "ee.reporting",
 ]
 
 CHANNEL_LAYERS = {
@@ -140,9 +145,9 @@ CHANNEL_LAYERS = {
 }
 
 # silence cache key length warnings
-import warnings
+import warnings  # noqa
 
-from django.core.cache import CacheKeyWarning
+from django.core.cache import CacheKeyWarning  # noqa
 
 warnings.simplefilter("ignore", CacheKeyWarning)
 
@@ -160,7 +165,7 @@ CACHES = {
 
 MIDDLEWARE = [
     "django.contrib.sessions.middleware.SessionMiddleware",
-    "corsheaders.middleware.CorsMiddleware",  ##
+    "corsheaders.middleware.CorsMiddleware",
     "tacticalrmm.middleware.LogIPMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -172,6 +177,7 @@ if SWAGGER_ENABLED:
     INSTALLED_APPS += ("drf_spectacular",)
 
 if DEBUG and not DEMO:
+    INSTALLED_APPS.insert(0, "daphne")
     INSTALLED_APPS += (
         "django_extensions",
         "silk",
@@ -226,12 +232,20 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
+
+def get_log_level() -> str:
+    if "TRMM_LOG_LEVEL" in os.environ:
+        return os.getenv("TRMM_LOG_LEVEL")  # type: ignore
+
+    return TRMM_LOG_LEVEL
+
+
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
     "formatters": {
         "verbose": {
-            "format": "[%(asctime)s] %(levelname)s [%(name)s:%(lineno)s] %(message)s",
+            "format": "[%(asctime)s] %(levelname)s [%(filename)s:%(funcName)s:%(lineno)d] %(message)s",
             "datefmt": "%d/%b/%Y %H:%M:%S",
         },
     },
@@ -241,10 +255,17 @@ LOGGING = {
             "class": "logging.FileHandler",
             "filename": os.path.join(LOG_DIR, "django_debug.log"),
             "formatter": "verbose",
-        }
+        },
+        "trmm": {
+            "level": get_log_level(),
+            "class": "logging.FileHandler",
+            "filename": os.path.join(LOG_DIR, "trmm_debug.log"),
+            "formatter": "verbose",
+        },
     },
     "loggers": {
-        "django.request": {"handlers": ["file"], "level": "ERROR", "propagate": True}
+        "django.request": {"handlers": ["file"], "level": "ERROR", "propagate": True},
+        "trmm": {"handlers": ["trmm"], "level": get_log_level(), "propagate": False},
     },
 }
 

@@ -41,7 +41,7 @@ class TestCheckViews(TacticalTestCase):
         self.assertEqual(len(resp.data), 4)
 
         # test agent doesn't exist
-        url = f"/agents/jh3498uf8fkh4ro8hfd8df98/checks/"
+        url = "/agents/jh3498uf8fkh4ro8hfd8df98/checks/"
         resp = self.client.get(url, format="json")
         self.assertEqual(resp.status_code, 404)
 
@@ -101,8 +101,7 @@ class TestCheckViews(TacticalTestCase):
             "fails_b4_alert": 3,
         }
 
-        for payload in [agent_payload, policy_payload]:
-
+        for payload in (agent_payload, policy_payload):
             # add valid check
             resp = self.client.post(url, payload, format="json")
             self.assertEqual(resp.status_code, 200)
@@ -148,8 +147,7 @@ class TestCheckViews(TacticalTestCase):
             "fails_b4_alert": 9,
         }
 
-        for payload in [agent_payload, policy_payload]:
-
+        for payload in (agent_payload, policy_payload):
             # add cpu check
             resp = self.client.post(url, payload, format="json")
             self.assertEqual(resp.status_code, 200)
@@ -174,6 +172,31 @@ class TestCheckViews(TacticalTestCase):
 
         self.check_not_authenticated("post", url)
 
+    def test_reset_all_checks_status(self):
+        # setup data
+        agent = baker.make_recipe("agents.agent")
+        check = baker.make_recipe("checks.diskspace_check", agent=agent)
+        baker.make("checks.CheckResult", assigned_check=check, agent=agent)
+        baker.make(
+            "checks.CheckHistory",
+            check_id=check.id,
+            agent_id=agent.agent_id,
+            _quantity=30,
+        )
+        baker.make(
+            "checks.CheckHistory",
+            check_id=check.id,
+            agent_id=agent.agent_id,
+            _quantity=30,
+        )
+
+        url = f"{base_url}/{agent.agent_id}/resetall/"
+
+        resp = self.client.post(url)
+        self.assertEqual(resp.status_code, 200)
+
+        self.check_not_authenticated("post", url)
+
     def test_add_memory_check(self):
         url = f"{base_url}/"
         agent = baker.make_recipe("agents.agent")
@@ -195,8 +218,7 @@ class TestCheckViews(TacticalTestCase):
             "fails_b4_alert": 1,
         }
 
-        for payload in [agent_payload, policy_payload]:
-
+        for payload in (agent_payload, policy_payload):
             # add memory check
             resp = self.client.post(url, payload, format="json")
             self.assertEqual(resp.status_code, 200)
@@ -239,7 +261,6 @@ class TestCheckViews(TacticalTestCase):
         r = self.client.post(url)
         self.assertEqual(r.status_code, 200)
         nats_cmd.assert_called_with({"func": "runchecks"}, timeout=15)
-        self.assertEqual(r.json(), f"Checks will now be re-run on {agent.hostname}")
 
         nats_cmd.reset_mock()
         nats_cmd.return_value = "timeout"
@@ -885,12 +906,12 @@ class TestCheckPermissions(TacticalTestCase):
         agent = baker.make_recipe("agents.agent")
         policy = baker.make("automation.Policy")
         unauthorized_agent = baker.make_recipe("agents.agent")
-        check = baker.make("checks.Check", agent=agent, _quantity=5)
-        unauthorized_check = baker.make(
+        check = baker.make("checks.Check", agent=agent, _quantity=5)  # noqa
+        unauthorized_check = baker.make(  # noqa
             "checks.Check", agent=unauthorized_agent, _quantity=7
         )
 
-        policy_checks = baker.make("checks.Check", policy=policy, _quantity=2)
+        policy_checks = baker.make("checks.Check", policy=policy, _quantity=2)  # noqa
 
         # test super user access
         self.check_authorized_superuser("get", f"{base_url}/")
@@ -973,7 +994,7 @@ class TestCheckPermissions(TacticalTestCase):
 
         url = f"{base_url}/"
 
-        for data in [policy_data, agent_data]:
+        for data in (policy_data, agent_data):
             # test superuser access
             self.check_authorized_superuser("post", url, data)
 
@@ -1007,8 +1028,7 @@ class TestCheckPermissions(TacticalTestCase):
         unauthorized_check = baker.make("checks.Check", agent=unauthorized_agent)
         policy_check = baker.make("checks.Check", policy=policy)
 
-        for method in ["get", "put", "delete"]:
-
+        for method in ("get", "put", "delete"):
             url = f"{base_url}/{check.id}/"
             unauthorized_url = f"{base_url}/{unauthorized_check.id}/"
             policy_url = f"{base_url}/{policy_check.id}/"
@@ -1047,7 +1067,6 @@ class TestCheckPermissions(TacticalTestCase):
 
     @patch("agents.models.Agent.nats_cmd")
     def test_check_action_permissions(self, nats_cmd):
-
         agent = baker.make_recipe("agents.agent")
         unauthorized_agent = baker.make_recipe("agents.agent")
         check = baker.make("checks.Check", agent=agent)
@@ -1061,7 +1080,7 @@ class TestCheckPermissions(TacticalTestCase):
             assigned_check=unauthorized_check,
         )
 
-        for action in ["reset", "run"]:
+        for action in ("reset", "run"):
             if action == "reset":
                 url = f"{base_url}/{check_result.id}/{action}/"
                 unauthorized_url = (

@@ -31,7 +31,7 @@ class User(AbstractUser, BaseAuditModel):
         on_delete=models.SET_NULL,
     )
     default_agent_tbl_tab = models.CharField(
-        max_length=50, choices=AgentTableTabs.choices, default=AgentTableTabs.SERVER
+        max_length=50, choices=AgentTableTabs.choices, default=AgentTableTabs.MIXED
     )
     agents_per_page = models.PositiveIntegerField(default=50)  # not currently used
     client_tree_sort = models.CharField(
@@ -39,6 +39,10 @@ class User(AbstractUser, BaseAuditModel):
     )
     client_tree_splitter = models.PositiveIntegerField(default=11)
     loading_bar_color = models.CharField(max_length=255, default="red")
+    dash_info_color = models.CharField(max_length=255, default="info")
+    dash_positive_color = models.CharField(max_length=255, default="positive")
+    dash_negative_color = models.CharField(max_length=255, default="negative")
+    dash_warning_color = models.CharField(max_length=255, default="warning")
     clear_search_when_switching = models.BooleanField(default=True)
     date_format = models.CharField(max_length=30, blank=True, null=True)
     is_installer_user = models.BooleanField(default=False)
@@ -91,7 +95,6 @@ class Role(BaseAuditModel):
 
     # agents
     can_list_agents = models.BooleanField(default=False)
-    can_ping_agents = models.BooleanField(default=False)
     can_use_mesh = models.BooleanField(default=False)
     can_uninstall_agents = models.BooleanField(default=False)
     can_update_agents = models.BooleanField(default=False)
@@ -105,6 +108,7 @@ class Role(BaseAuditModel):
     can_run_bulk = models.BooleanField(default=False)
     can_recover_agents = models.BooleanField(default=False)
     can_list_agent_history = models.BooleanField(default=False)
+    can_send_wol = models.BooleanField(default=False)
 
     # core
     can_list_notes = models.BooleanField(default=False)
@@ -181,11 +185,14 @@ class Role(BaseAuditModel):
     can_list_api_keys = models.BooleanField(default=False)
     can_manage_api_keys = models.BooleanField(default=False)
 
+    # reporting
+    can_view_reports = models.BooleanField(default=False)
+    can_manage_reports = models.BooleanField(default=False)
+
     def __str__(self):
         return self.name
 
     def save(self, *args, **kwargs) -> None:
-
         # delete cache on save
         cache.delete(f"{ROLE_CACHE_PREFIX}{self.name}")
         super(BaseAuditModel, self).save(*args, **kwargs)

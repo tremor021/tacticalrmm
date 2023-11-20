@@ -1,3 +1,6 @@
+from datetime import datetime
+
+from django.utils import timezone as djangotime
 from rest_framework import serializers
 
 from scripts.models import Script
@@ -14,7 +17,6 @@ class TaskResultSerializer(serializers.ModelSerializer):
 
 
 class TaskSerializer(serializers.ModelSerializer):
-
     check_name = serializers.ReadOnlyField(source="assigned_check.readable_desc")
     schedule = serializers.ReadOnlyField()
     alert_template = serializers.SerializerMethodField()
@@ -30,52 +32,49 @@ class TaskSerializer(serializers.ModelSerializer):
         )
 
     def validate_actions(self, value):
-
         if not value:
             raise serializers.ValidationError(
-                f"There must be at least one action configured"
+                "There must be at least one action configured"
             )
 
         for action in value:
             if "type" not in action:
                 raise serializers.ValidationError(
-                    f"Each action must have a type field of either 'script' or 'cmd'"
+                    "Each action must have a type field of either 'script' or 'cmd'"
                 )
 
             if action["type"] == "script":
                 if "script" not in action:
                     raise serializers.ValidationError(
-                        f"A script action type must have a 'script' field with primary key of script"
+                        "A script action type must have a 'script' field with primary key of script"
                     )
 
                 if "script_args" not in action:
                     raise serializers.ValidationError(
-                        f"A script action type must have a 'script_args' field with an array of arguments"
+                        "A script action type must have a 'script_args' field with an array of arguments"
                     )
 
                 if "timeout" not in action:
                     raise serializers.ValidationError(
-                        f"A script action type must have a 'timeout' field"
+                        "A script action type must have a 'timeout' field"
                     )
 
             if action["type"] == "cmd":
                 if "command" not in action:
                     raise serializers.ValidationError(
-                        f"A command action type must have a 'command' field"
+                        "A command action type must have a 'command' field"
                     )
 
                 if "timeout" not in action:
                     raise serializers.ValidationError(
-                        f"A command action type must have a 'timeout' field"
+                        "A command action type must have a 'timeout' field"
                     )
 
         return value
 
     def validate(self, data):
-
         # allow editing with task_type not specified
         if self.instance and "task_type" not in data:
-
             # remove schedule related fields from data
             if "run_time_date" in data:
                 del data["run_time_date"]
@@ -96,6 +95,13 @@ class TaskSerializer(serializers.ModelSerializer):
             if "assigned_check" in data:
                 del data["assigned_check"]
             return data
+
+        if (
+            "expire_date" in data
+            and isinstance(data["expire_date"], datetime)
+            and djangotime.now() > data["expire_date"]
+        ):
+            raise serializers.ValidationError("Expires date/time is in the past")
 
         # run_time_date required
         if (
@@ -180,7 +186,6 @@ class TaskSerializer(serializers.ModelSerializer):
         return data
 
     def get_alert_template(self, obj):
-
         if obj.agent:
             alert_template = obj.agent.alert_template
         else:
@@ -228,6 +233,12 @@ class TaskGOGetSerializer(serializers.ModelSerializer):
                     # script doesn't exist so remove it
                     actions_to_remove.append(action["script"])
                     continue
+                # wrote a custom migration for env_vars but leaving this just in case.
+                # can be removed later
+                try:
+                    env_vars = action["env_vars"]
+                except KeyError:
+                    env_vars = []
                 tmp.append(
                     {
                         "type": "script",
@@ -241,6 +252,11 @@ class TaskGOGetSerializer(serializers.ModelSerializer):
                         "shell": script.shell,
                         "timeout": action["timeout"],
                         "run_as_user": script.run_as_user,
+                        "env_vars": Script.parse_script_env_vars(
+                            agent=agent,
+                            shell=script.shell,
+                            env_vars=env_vars,
+                        ),
                     }
                 )
         if actions_to_remove:

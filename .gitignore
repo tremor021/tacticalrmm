@@ -56,3 +56,6 @@ daphne.sock.lock
 .pytest_cache
 coverage.xml
 setup_dev.yml
+11env/
+query_schema.json
+gunicorn_config.py

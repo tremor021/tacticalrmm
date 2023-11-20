@@ -1,7 +1,6 @@
-import pytz
 from rest_framework import serializers
 
-from tacticalrmm.constants import AGENT_STATUS_ONLINE
+from tacticalrmm.constants import AGENT_STATUS_ONLINE, ALL_TIMEZONES
 from winupdate.serializers import WinUpdatePolicySerializer
 
 from .models import Agent, AgentCustomField, AgentHistory, Note
@@ -71,7 +70,7 @@ class AgentSerializer(serializers.ModelSerializer):
         return policies
 
     def get_all_timezones(self, obj):
-        return pytz.all_timezones
+        return ALL_TIMEZONES
 
     class Meta:
         model = Agent
@@ -95,9 +94,10 @@ class AgentTableSerializer(serializers.ModelSerializer):
     local_ips = serializers.ReadOnlyField()
     make_model = serializers.ReadOnlyField()
     physical_disks = serializers.ReadOnlyField()
+    serial_number = serializers.ReadOnlyField()
+    custom_fields = AgentCustomFieldSerializer(many=True, read_only=True)
 
     def get_alert_template(self, obj):
-
         if not obj.alert_template:
             return None
 
@@ -154,6 +154,8 @@ class AgentTableSerializer(serializers.ModelSerializer):
             "local_ips",
             "make_model",
             "physical_disks",
+            "custom_fields",
+            "serial_number",
         ]
         depth = 2
 

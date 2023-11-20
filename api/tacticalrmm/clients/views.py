@@ -3,6 +3,7 @@ import re
 import uuid
 from contextlib import suppress
 
+from django.conf import settings
 from django.db.models import Count, Exists, OuterRef, Prefetch, prefetch_related_objects
 from django.shortcuts import get_object_or_404
 from django.utils import timezone as djangotime
@@ -96,7 +97,6 @@ class GetAddClients(APIView):
         # save custom fields
         if "custom_fields" in request.data.keys():
             for field in request.data["custom_fields"]:
-
                 custom_field = field
                 custom_field["client"] = client.id
 
@@ -148,7 +148,6 @@ class GetUpdateDeleteClient(APIView):
         # update custom fields
         if "custom_fields" in request.data.keys():
             for field in request.data["custom_fields"]:
-
                 custom_field = field
                 custom_field["client"] = pk
 
@@ -195,7 +194,6 @@ class GetAddSites(APIView):
         return Response(SiteSerializer(sites, many=True).data)
 
     def post(self, request):
-
         if not _has_perm_on_client(request.user, request.data["site"]["client"]):
             raise PermissionDenied()
 
@@ -205,9 +203,7 @@ class GetAddSites(APIView):
 
         # save custom fields
         if "custom_fields" in request.data.keys():
-
             for field in request.data["custom_fields"]:
-
                 custom_field = field
                 custom_field["site"] = site.id
 
@@ -246,9 +242,7 @@ class GetUpdateDeleteSite(APIView):
 
         # update custom field
         if "custom_fields" in request.data.keys():
-
             for field in request.data["custom_fields"]:
-
                 custom_field = field
                 custom_field["site"] = pk
 
@@ -295,6 +289,9 @@ class AgentDeployment(APIView):
         return Response(DeploymentSerializer(deps, many=True).data)
 
     def post(self, request):
+        if getattr(settings, "TRMM_INSECURE", False):
+            return notify_error("Not available in insecure mode")
+
         from accounts.models import User
 
         site = get_object_or_404(Site, pk=request.data["site"])
@@ -347,10 +344,12 @@ class AgentDeployment(APIView):
 
 
 class GenerateAgent(APIView):
-
     permission_classes = (AllowAny,)
 
     def get(self, request, uid):
+        if getattr(settings, "TRMM_INSECURE", False):
+            return notify_error("Not available in insecure mode")
+
         from tacticalrmm.utils import generate_winagent_exe
 
         try:

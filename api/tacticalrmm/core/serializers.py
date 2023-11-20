@@ -1,15 +1,15 @@
-import pytz
 from rest_framework import serializers
+
+from tacticalrmm.constants import ALL_TIMEZONES
 
 from .models import CodeSignToken, CoreSettings, CustomField, GlobalKVStore, URLAction
 
 
 class CoreSettingsSerializer(serializers.ModelSerializer):
-
     all_timezones = serializers.SerializerMethodField("all_time_zones")
 
     def all_time_zones(self, obj):
-        return pytz.all_timezones
+        return ALL_TIMEZONES
 
     class Meta:
         model = CoreSettings

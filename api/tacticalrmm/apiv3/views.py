@@ -14,6 +14,7 @@ from rest_framework.views import APIView
 from accounts.models import User
 from agents.models import Agent, AgentHistory
 from agents.serializers import AgentHistorySerializer
+from apiv3.utils import get_agent_config
 from autotasks.models import AutomatedTask, TaskResult
 from autotasks.serializers import TaskGOGetSerializer, TaskResultSerializer
 from checks.constants import CHECK_DEFER, CHECK_RESULT_DEFER
@@ -40,13 +41,12 @@ from tacticalrmm.constants import (
     MeshAgentIdent,
     PAStatus,
 )
-from tacticalrmm.helpers import notify_error
+from tacticalrmm.helpers import make_random_password, notify_error
 from tacticalrmm.utils import reload_nats
 from winupdate.models import WinUpdate, WinUpdatePolicy
 
 
 class CheckIn(APIView):
-
     authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
 
@@ -254,9 +254,7 @@ class CheckRunner(APIView):
                 check.check_result.last_run
                 < djangotime.now()
                 - djangotime.timedelta(
-                    seconds=check.run_interval
-                    if check.run_interval
-                    else agent.check_interval
+                    seconds=check.run_interval or agent.check_interval
                 )
             )
         ]
@@ -366,7 +364,6 @@ class TaskRunner(APIView):
         # check if task is a collector and update the custom field
         if task.custom_field:
             if not task_result.stderr:
-
                 task_result.save_collector_results()
 
                 status = CheckStatus.PASSING
@@ -460,7 +457,7 @@ class NewAgent(APIView):
         user = User.objects.create_user(  # type: ignore
             username=request.data["agent_id"],
             agent=agent,
-            password=User.objects.make_random_password(60),  # type: ignore
+            password=make_random_password(len=60),
         )
 
         token = Token.objects.create(user=user)
@@ -516,7 +513,7 @@ class Installer(APIView):
         ver = request.data["version"]
         if (
             pyver.parse(ver) < pyver.parse(settings.LATEST_AGENT_VER)
-            and not "-dev" in settings.LATEST_AGENT_VER
+            and "-dev" not in settings.LATEST_AGENT_VER
         ):
             return notify_error(
                 f"Old installer detected (version {ver} ). Latest version is {settings.LATEST_AGENT_VER} Please generate a new installer from the RMM"
@@ -569,3 +566,12 @@ class AgentHistoryResult(APIView):
         s.is_valid(raise_exception=True)
         s.save()
         return Response("ok")
+
+
+class AgentConfig(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, agentid):
+        ret = get_agent_config()
+        return Response(ret._to_dict())

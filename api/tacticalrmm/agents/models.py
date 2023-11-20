@@ -2,7 +2,6 @@ import asyncio
 import re
 from collections import Counter
 from contextlib import suppress
-from distutils.version import LooseVersion
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union, cast
 
 import msgpack
@@ -16,8 +15,10 @@ from django.db import models
 from django.utils import timezone as djangotime
 from nats.errors import TimeoutError
 from packaging import version as pyver
+from packaging.version import Version as LooseVersion
 
 from agents.utils import get_agent_url
+from checks.models import CheckResult
 from core.models import TZ_CHOICES
 from core.utils import get_core_settings, send_command_with_mesh
 from logs.models import BaseAuditModel, DebugLog, PendingAction
@@ -25,6 +26,7 @@ from tacticalrmm.constants import (
     AGENT_STATUS_OFFLINE,
     AGENT_STATUS_ONLINE,
     AGENT_STATUS_OVERDUE,
+    AGENT_TBL_PEND_ACTION_CNT_CACHE_PREFIX,
     ONLINE_AGENTS,
     AgentHistoryType,
     AgentMonType,
@@ -38,7 +40,7 @@ from tacticalrmm.constants import (
     PAAction,
     PAStatus,
 )
-from tacticalrmm.helpers import get_nats_ports
+from tacticalrmm.helpers import setup_nats_options
 from tacticalrmm.models import PermissionQuerySet
 
 if TYPE_CHECKING:
@@ -199,8 +201,9 @@ class Agent(BaseAuditModel):
 
     @property
     def status(self) -> str:
-        offline = djangotime.now() - djangotime.timedelta(minutes=self.offline_time)
-        overdue = djangotime.now() - djangotime.timedelta(minutes=self.overdue_time)
+        now = djangotime.now()
+        offline = now - djangotime.timedelta(minutes=self.offline_time)
+        overdue = now - djangotime.timedelta(minutes=self.overdue_time)
 
         if self.last_seen is not None:
             if (self.last_seen < offline) and (self.last_seen > overdue):
@@ -214,8 +217,6 @@ class Agent(BaseAuditModel):
 
     @property
     def checks(self) -> Dict[str, Any]:
-        from checks.models import CheckResult
-
         total, passing, failing, warning, info = 0, 0, 0, 0, 0
 
         for check in self.get_checks_with_policies(exclude_overridden=True):
@@ -256,6 +257,15 @@ class Agent(BaseAuditModel):
             "info": info,
             "has_failing_checks": failing > 0 or warning > 0,
         }
+        return ret
+
+    @property
+    def pending_actions_count(self) -> int:
+        ret = cache.get(f"{AGENT_TBL_PEND_ACTION_CNT_CACHE_PREFIX}{self.pk}")
+        if ret is None:
+            ret = self.pendingactions.filter(status=PAStatus.PENDING).count()
+            cache.set(f"{AGENT_TBL_PEND_ACTION_CNT_CACHE_PREFIX}{self.pk}", ret, 600)
+
         return ret
 
     @property
@@ -398,6 +408,16 @@ class Agent(BaseAuditModel):
         except:
             return ["unknown disk"]
 
+    @property
+    def serial_number(self) -> str:
+        if self.is_posix:
+            return ""
+
+        try:
+            return self.wmi_detail["bios"][0][0]["SerialNumber"]
+        except:
+            return ""
+
     @classmethod
     def online_agents(cls, min_version: str = "") -> "List[Agent]":
         if min_version:
@@ -420,7 +440,6 @@ class Agent(BaseAuditModel):
     def get_checks_with_policies(
         self, exclude_overridden: bool = False
     ) -> "List[Check]":
-
         if exclude_overridden:
             checks = (
                 list(
@@ -435,12 +454,10 @@ class Agent(BaseAuditModel):
         return self.add_check_results(checks)
 
     def get_tasks_with_policies(self) -> "List[AutomatedTask]":
-
         tasks = list(self.autotasks.all()) + self.get_tasks_from_policies()
         return self.add_task_results(tasks)
 
     def add_task_results(self, tasks: "List[AutomatedTask]") -> "List[AutomatedTask]":
-
         results = self.taskresults.all()  # type: ignore
 
         for task in tasks:
@@ -452,7 +469,6 @@ class Agent(BaseAuditModel):
         return tasks
 
     def add_check_results(self, checks: "List[Check]") -> "List[Check]":
-
         results = self.checkresults.all()  # type: ignore
 
         for check in checks:
@@ -514,7 +530,6 @@ class Agent(BaseAuditModel):
         # determine if any agent checks have a custom interval and set the lowest interval
         for check in self.get_checks_with_policies():
             if check.run_interval and check.run_interval < interval:
-
                 # don't allow check runs less than 15s
                 interval = 15 if check.run_interval < 15 else check.run_interval
 
@@ -530,8 +545,8 @@ class Agent(BaseAuditModel):
         run_on_any: bool = False,
         history_pk: int = 0,
         run_as_user: bool = False,
+        env_vars: list[str] = [],
     ) -> Any:
-
         from scripts.models import Script
 
         script = Script.objects.get(pk=scriptpk)
@@ -541,6 +556,7 @@ class Agent(BaseAuditModel):
             run_as_user = True
 
         parsed_args = script.parse_script_args(self, script.shell, args)
+        parsed_env_vars = script.parse_script_env_vars(self, script.shell, env_vars)
 
         data = {
             "func": "runscriptfull" if full else "runscript",
@@ -551,6 +567,7 @@ class Agent(BaseAuditModel):
                 "shell": script.shell,
             },
             "run_as_user": run_as_user,
+            "env_vars": parsed_env_vars,
         }
 
         if history_pk != 0:
@@ -787,17 +804,9 @@ class Agent(BaseAuditModel):
     async def nats_cmd(
         self, data: Dict[Any, Any], timeout: int = 30, wait: bool = True
     ) -> Any:
-        nats_std_port, _ = get_nats_ports()
-        options = {
-            "servers": f"tls://{settings.ALLOWED_HOSTS[0]}:{nats_std_port}",
-            "user": "tacticalrmm",
-            "password": settings.SECRET_KEY,
-            "connect_timeout": 3,
-            "max_reconnect_attempts": 2,
-        }
-
+        opts = setup_nats_options()
         try:
-            nc = await nats.connect(**options)
+            nc = await nats.connect(**opts)
         except:
             return "natsdown"
 
@@ -878,8 +887,10 @@ class Agent(BaseAuditModel):
                 # extract the version from the title and sort from oldest to newest
                 # skip if no version info is available therefore nothing to parse
                 try:
+                    matches = r"(Version|Versão)"
+                    pattern = r"\(" + matches + r"(.*?)\)"
                     vers = [
-                        re.search(r"\(Version(.*?)\)", i).group(1).strip()
+                        re.search(pattern, i, flags=re.IGNORECASE).group(2).strip()
                         for i in titles
                     ]
                     sorted_vers = sorted(vers, key=LooseVersion)
@@ -1000,6 +1011,9 @@ class AgentCustomField(models.Model):
         blank=True,
         default=list,
     )
+
+    class Meta:
+        unique_together = (("agent", "field"),)
 
     def __str__(self) -> str:
         return self.field.name

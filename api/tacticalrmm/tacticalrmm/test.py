@@ -11,10 +11,9 @@ from agents.models import Agent
 from automation.models import Policy
 from core.models import CoreSettings
 from tacticalrmm.constants import CustomFieldModel, CustomFieldType
+from tacticalrmm.helpers import make_random_password
 
 if TYPE_CHECKING:
-    from agents.models import Agent
-    from automation.models import Policy
     from checks.models import Check
     from clients.models import Client, Site
     from core.models import CustomField
@@ -66,7 +65,7 @@ class TacticalTestCase(TestCase):
         User.objects.create_user(  # type: ignore
             username=uuid.uuid4().hex,
             is_installer_user=True,
-            password=User.objects.make_random_password(60),  # type: ignore
+            password=make_random_password(len=60),  # type: ignore
         )
 
     def setup_client(self) -> None:
@@ -75,7 +74,7 @@ class TacticalTestCase(TestCase):
     def setup_agent_auth(self, agent: "Agent") -> None:
         agent_user = User.objects.create_user(  # type: ignore
             username=agent.agent_id,
-            password=User.objects.make_random_password(60),  # type: ignore
+            password=make_random_password(len=60),  # type: ignore
         )
         Token.objects.create(user=agent_user)
 
@@ -95,7 +94,6 @@ class TacticalTestCase(TestCase):
     def create_checks(
         self, parent: "Union[Policy, Agent]", script: "Optional[Script]" = None
     ) -> "List[Check]":
-
         # will create 1 of every check and associate it with the policy object passed
         check_recipes = [
             "checks.diskspace_check",
@@ -112,7 +110,7 @@ class TacticalTestCase(TestCase):
             parent_obj["policy"] = parent
         else:
             parent_obj["agent"] = parent
-        checks = list()
+        checks = []
         for recipe in check_recipes:
             if not script:
                 checks.append(baker.make_recipe(recipe, **parent_obj))
@@ -142,7 +140,6 @@ class TacticalTestCase(TestCase):
     def check_authorized_superuser(
         self, method: str, url: str, data: Optional[Dict[Any, Any]] = {}
     ) -> Any:
-
         try:
             # create django superuser and test authorized
             user = baker.make("accounts.User", is_active=True, is_superuser=True)

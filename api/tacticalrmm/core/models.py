@@ -3,7 +3,6 @@ from contextlib import suppress
 from email.message import EmailMessage
 from typing import TYPE_CHECKING, List, Optional, cast
 
-import pytz
 import requests
 from django.conf import settings
 from django.contrib.postgres.fields import ArrayField
@@ -15,6 +14,7 @@ from twilio.rest import Client as TwClient
 
 from logs.models import BaseAuditModel, DebugLog
 from tacticalrmm.constants import (
+    ALL_TIMEZONES,
     CORESETTINGS_CACHE_KEY,
     CustomFieldModel,
     CustomFieldType,
@@ -24,7 +24,7 @@ from tacticalrmm.constants import (
 if TYPE_CHECKING:
     from alerts.models import AlertTemplate
 
-TZ_CHOICES = [(_, _) for _ in pytz.all_timezones]
+TZ_CHOICES = [(_, _) for _ in ALL_TIMEZONES]
 
 
 class CoreSettings(BaseAuditModel):
@@ -98,6 +98,10 @@ class CoreSettings(BaseAuditModel):
     date_format = models.CharField(
         max_length=30, blank=True, default="MMM-DD-YYYY - HH:mm"
     )
+    open_ai_token = models.CharField(max_length=255, null=True, blank=True)
+    open_ai_model = models.CharField(
+        max_length=255, blank=True, default="gpt-3.5-turbo"
+    )
 
     def save(self, *args, **kwargs) -> None:
         from alerts.tasks import cache_agents_alert_template
@@ -126,10 +130,10 @@ class CoreSettings(BaseAuditModel):
                 cache_agents_alert_template.delay()
 
             if old_settings.workstation_policy != self.workstation_policy:
-                cache.delete_many_pattern(f"site_workstation_*")
+                cache.delete_many_pattern("site_workstation_*")
 
             if old_settings.server_policy != self.server_policy:
-                cache.delete_many_pattern(f"site_server_*")
+                cache.delete_many_pattern("site_server_*")
 
             if (
                 old_settings.server_policy != self.server_policy
@@ -272,7 +276,6 @@ class CoreSettings(BaseAuditModel):
 
 
 class CustomField(BaseAuditModel):
-
     order = models.PositiveIntegerField(default=0)
     model = models.CharField(max_length=25, choices=CustomFieldModel.choices)
     type = models.CharField(
@@ -363,6 +366,23 @@ class CodeSignToken(models.Model):
             return False
 
         return r.status_code == 200
+
+    @property
+    def is_expired(self) -> bool:
+        if not self.token:
+            return False
+
+        try:
+            r = requests.post(
+                settings.CHECK_TOKEN_URL,
+                json={"token": self.token, "api": settings.ALLOWED_HOSTS[0]},
+                headers={"Content-type": "application/json"},
+                timeout=15,
+            )
+        except:
+            return False
+
+        return r.status_code == 401
 
     def __str__(self):
         return "Code signing token"

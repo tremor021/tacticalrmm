@@ -1,11 +1,12 @@
 black
+daphne==4.0.0
 Werkzeug
 django-extensions
 isort
-types-pytz
 django-silk
 mypy
 django-stubs
+pandas-stubs
 djangorestframework-stubs
 django-types
 djangorestframework-types
@@ -15,3 +16,4 @@ types-Markdown
 types-requests
 types-PyYAML
 types-urllib3
+types-Jinja2

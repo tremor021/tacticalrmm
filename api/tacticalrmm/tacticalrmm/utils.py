@@ -3,14 +3,16 @@ import os
 import subprocess
 import tempfile
 import time
-from typing import List, Optional, Union
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, List, Literal, Optional, Union
+from zoneinfo import ZoneInfo
 
-import pytz
 import requests
 from channels.auth import AuthMiddlewareStack
 from channels.db import database_sync_to_async
 from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
+from django.core.cache import cache
 from django.http import FileResponse
 from knox.auth import TokenAuthentication
 from rest_framework.response import Response
@@ -21,6 +23,7 @@ from logs.models import DebugLog
 from tacticalrmm.constants import (
     MONTH_DAYS,
     MONTHS,
+    REDIS_LOCK_EXPIRE,
     WEEK_DAYS,
     WEEKS,
     AgentPlat,
@@ -28,7 +31,15 @@ from tacticalrmm.constants import (
     DebugLogType,
     ScriptShell,
 )
-from tacticalrmm.helpers import get_certs, get_nats_ports, notify_error
+from tacticalrmm.helpers import (
+    get_certs,
+    get_nats_internal_protocol,
+    get_nats_ports,
+    notify_error,
+)
+
+if TYPE_CHECKING:
+    from clients.models import Client, Site
 
 
 def generate_winagent_exe(
@@ -44,7 +55,6 @@ def generate_winagent_exe(
     api: str,
     file_name: str,
 ) -> Union[Response, FileResponse]:
-
     from agents.utils import get_agent_url
 
     inno = (
@@ -72,7 +82,6 @@ def generate_winagent_exe(
     headers = {"Content-type": "application/json"}
 
     with tempfile.NamedTemporaryFile() as fp:
-
         try:
             r = requests.post(
                 settings.EXE_GEN_URL,
@@ -96,7 +105,7 @@ def generate_winagent_exe(
 
 
 def get_default_timezone():
-    return pytz.timezone(get_core_settings().default_time_zone)
+    return ZoneInfo(get_core_settings().default_time_zone)
 
 
 def get_bit_days(days: list[str]) -> int:
@@ -181,7 +190,11 @@ def reload_nats() -> None:
                     "permissions": {
                         "publish": {"allow": agent.agent_id},
                         "subscribe": {"allow": agent.agent_id},
-                        "allow_responses": True,
+                        "allow_responses": {
+                            "expires": getattr(
+                                settings, "NATS_ALLOW_RESPONSE_EXPIRATION", "1435m"
+                            )
+                        },
                     },
                 }
             )
@@ -196,10 +209,6 @@ def reload_nats() -> None:
     nats_std_port, nats_ws_port = get_nats_ports()
 
     config = {
-        "tls": {
-            "cert_file": cert_file,
-            "key_file": key_file,
-        },
         "authorization": {"users": users},
         "max_payload": 67108864,
         "port": nats_std_port,  # internal only
@@ -208,6 +217,20 @@ def reload_nats() -> None:
             "no_tls": True,  # TLS is handled by nginx, so not needed here
         },
     }
+
+    if get_nats_internal_protocol() == "tls":
+        config["tls"] = {
+            "cert_file": cert_file,
+            "key_file": key_file,
+        }
+
+    if "NATS_HTTP_PORT" in os.environ:
+        config["http_port"] = int(os.getenv("NATS_HTTP_PORT"))  # type: ignore
+    elif hasattr(settings, "NATS_HTTP_PORT"):
+        config["http_port"] = settings.NATS_HTTP_PORT  # type: ignore
+
+    if "NATS_WS_COMPRESSION" in os.environ or hasattr(settings, "NATS_WS_COMPRESSION"):
+        config["websocket"]["compression"] = True
 
     conf = os.path.join(settings.BASE_DIR, "nats-rmm.conf")
     with open(conf, "w") as f:
@@ -242,7 +265,7 @@ class KnoxAuthMiddlewareInstance:
         return await self.app(scope, receive, send)
 
 
-KnoxAuthMiddlewareStack = lambda inner: KnoxAuthMiddlewareInstance(
+KnoxAuthMiddlewareStack = lambda inner: KnoxAuthMiddlewareInstance(  # noqa
     AuthMiddlewareStack(inner)
 )
 
@@ -264,121 +287,117 @@ def get_latest_trmm_ver() -> str:
     return "error"
 
 
-def replace_db_values(
-    string: str, instance=None, shell: str = None, quotes=True  # type:ignore
-) -> Union[str, None]:
-    from clients.models import Client, Site
+# Receives something like {{ client.name }} and a Model instance of Client, Site, or Agent. If an
+# agent instance is passed it will resolve the value of agent.client.name and return the agent's client name.
+#
+# You can query custom fields by using their name. {{ site.Custom Field Name }}
+#
+# This will recursively lookup values for relations. {{ client.site.id }}
+#
+# You can also use {{ global.value }} without an obj instance to use the global key store
+def get_db_value(
+    *, string: str, instance: Optional[Union["Agent", "Client", "Site"]] = None
+) -> Union[str, List[str], Literal[True], Literal[False], None]:
     from core.models import CustomField, GlobalKVStore
 
-    # split by period if exists. First should be model and second should be property i.e {{client.name}}
-    temp = string.split(".")
-
-    # check for model and property
-    if len(temp) < 2:
-        # ignore arg since it is invalid
-        return ""
+    # get properties into an array
+    props = string.strip().split(".")
 
     # value is in the global keystore and replace value
-    if temp[0] == "global":
-        if GlobalKVStore.objects.filter(name=temp[1]).exists():
-            value = GlobalKVStore.objects.get(name=temp[1]).value
-
-            return f"'{value}'" if quotes else value
-        else:
+    if props[0] == "global" and len(props) == 2:
+        try:
+            return GlobalKVStore.objects.get(name=props[1]).value
+        except GlobalKVStore.DoesNotExist:
             DebugLog.error(
                 log_type=DebugLogType.SCRIPTING,
-                message=f"Couldn't lookup value for: {string}. Make sure it exists in CoreSettings > Key Store",  # type:ignore
+                message=f"Couldn't lookup value for: {string}. Make sure it exists in CoreSettings > Key Store",
             )
-            return ""
+            return None
 
     if not instance:
         # instance must be set if not global property
-        return ""
+        return None
 
-    if temp[0] == "client":
-        model = "client"
-        if isinstance(instance, Client):
-            obj = instance
-        elif hasattr(instance, "client"):
-            obj = instance.client
-        else:
-            obj = None
-    elif temp[0] == "site":
-        model = "site"
-        if isinstance(instance, Site):
-            obj = instance
-        elif hasattr(instance, "site"):
-            obj = instance.site
-        else:
-            obj = None
-    elif temp[0] == "agent":
-        model = "agent"
-        if isinstance(instance, Agent):
-            obj = instance
-        else:
-            obj = None
-    else:
-        # ignore arg since it is invalid
+    # custom field lookup
+    try:
+        # looking up custom field directly on this instance
+        if len(props) == 2:
+            field = CustomField.objects.get(model=props[0], name=props[1])
+            model_fields = getattr(field, f"{props[0]}_fields")
+
+            try:
+                # resolve the correct model id
+                if props[0] != instance.__class__.__name__.lower():
+                    value = model_fields.get(
+                        **{props[0]: getattr(instance, props[0])}
+                    ).value
+                else:
+                    value = model_fields.get(**{f"{props[0]}_id": instance.id}).value
+
+                if field.type != CustomFieldType.CHECKBOX:
+                    if value:
+                        return value
+                    else:
+                        return field.default_value
+                else:
+                    return bool(value)
+            except:
+                return (
+                    field.default_value
+                    if field.type != CustomFieldType.CHECKBOX
+                    else bool(field.default_value)
+                )
+    except CustomField.DoesNotExist:
+        pass
+
+    # if the instance is the same as the first prop. We remove it.
+    if props[0] == instance.__class__.__name__.lower():
+        del props[0]
+
+    instance_value = instance
+
+    # look through all properties and return the value
+    for prop in props:
+        if hasattr(instance_value, prop):
+            value = getattr(instance_value, prop)
+            if callable(value):
+                return None
+            instance_value = value
+
+        if not instance_value:
+            return None
+
+    return instance_value
+
+
+def replace_arg_db_values(
+    string: str, instance=None, shell: str = None, quotes=True  # type:ignore
+) -> Union[str, None]:
+    # resolve the value
+    value = get_db_value(string=string, instance=instance)
+
+    # check for model and property
+    if value is None:
         DebugLog.error(
             log_type=DebugLogType.SCRIPTING,
-            message=f"{instance} Not enough information to find value for: {string}. Only agent, site, client, and global are supported.",
+            message=f"Couldn't lookup value for: {string}. Make sure it exists",
         )
         return ""
 
-    if not obj:
-        return ""
+    # format args for str
+    if isinstance(value, str):
+        if shell == ScriptShell.POWERSHELL and "'" in value:
+            value = value.replace("'", "''")
 
-    # check if attr exists and isn't a function
-    if hasattr(obj, temp[1]) and not callable(getattr(obj, temp[1])):
-        value = f"'{getattr(obj, temp[1])}'" if quotes else getattr(obj, temp[1])
+        return f"'{value}'" if quotes else value
 
-    elif CustomField.objects.filter(model=model, name=temp[1]).exists():
+    # format args for list
+    elif isinstance(value, list):
+        return f"'{format_shell_array(value)}'" if quotes else format_shell_array(value)
 
-        field = CustomField.objects.get(model=model, name=temp[1])
-        model_fields = getattr(field, f"{model}_fields")
-        value = None
-        if model_fields.filter(**{model: obj}).exists():
-            if (
-                field.type != CustomFieldType.CHECKBOX
-                and model_fields.get(**{model: obj}).value
-            ):
-                value = model_fields.get(**{model: obj}).value
-            elif field.type == CustomFieldType.CHECKBOX:
-                value = model_fields.get(**{model: obj}).value
-
-        # need explicit None check since a false boolean value will pass default value
-        if value == None and field.default_value != None:
-            value = field.default_value
-
-        # check if value exists and if not use default
-        if value and field.type == CustomFieldType.MULTIPLE:
-            value = (
-                f"'{format_shell_array(value)}'"
-                if quotes
-                else format_shell_array(value)
-            )
-        elif value != None and field.type == CustomFieldType.CHECKBOX:
-            value = format_shell_bool(value, shell)
-        else:
-            value = f"'{value}'" if quotes else value
-
-    else:
-        # ignore arg since property is invalid
-        DebugLog.error(
-            log_type=DebugLogType.SCRIPTING,
-            message=f"{instance} Couldn't find property on supplied variable: {string}. Make sure it exists as a custom field or a valid agent property",
-        )
-        return ""
-
-    # log any unhashable type errors
-    if value != None:
-        return value
-    else:
-        DebugLog.error(
-            log_type=DebugLogType.SCRIPTING,
-            message=f" {instance}({instance.pk}) Couldn't lookup value for: {string}. Make sure it exists as a custom field or a valid agent property",
-        )
-        return ""
+    # format args for bool
+    elif value is True or value is False:
+        return format_shell_bool(value, shell)
 
 
 def format_shell_array(value: list[str]) -> str:
@@ -393,3 +412,34 @@ def format_shell_bool(value: bool, shell: Optional[str]) -> str:
         return "$True" if value else "$False"
 
     return "1" if value else "0"
+
+
+# https://docs.celeryq.dev/en/latest/tutorials/task-cookbook.html#cookbook-task-serial
+@contextmanager
+def redis_lock(lock_id, oid):
+    timeout_at = time.monotonic() + REDIS_LOCK_EXPIRE - 3
+    status = cache.add(lock_id, oid, REDIS_LOCK_EXPIRE)
+    try:
+        yield status
+    finally:
+        if time.monotonic() < timeout_at and status:
+            cache.delete(lock_id)
+
+
+def runcmd_placeholder_text() -> dict[str, str]:
+    ret = {
+        "cmd": getattr(
+            settings,
+            "CMD_PLACEHOLDER_TEXT",
+            "rmdir /S /Q C:\\Windows\\System32",
+        ),
+        "powershell": getattr(
+            settings,
+            "POWERSHELL_PLACEHOLDER_TEXT",
+            "Remove-Item -Recurse -Force C:\\Windows\\System32",
+        ),
+        "shell": getattr(
+            settings, "SHELL_PLACEHOLDER_TEXT", "rm -rf --no-preserve-root /"
+        ),
+    }
+    return ret

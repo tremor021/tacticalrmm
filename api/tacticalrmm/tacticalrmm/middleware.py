@@ -3,7 +3,7 @@ from contextlib import suppress
 from typing import Any, Dict, Optional
 
 from django.conf import settings
-from ipware import get_client_ip
+from python_ipware import IpWare
 from rest_framework.exceptions import AuthenticationFailed
 
 from tacticalrmm.constants import DEMO_NOT_ALLOWED
@@ -40,7 +40,6 @@ class AuditMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-
         response = self.get_response(request)
         return response
 
@@ -65,7 +64,6 @@ class AuditMiddleware:
             # check if user is authenticated
             with suppress(AuthenticationFailed):
                 if hasattr(request, "user") and request.user.is_authenticated:
-
                     try:
                         view_Name = view_func.__dict__["view_class"].__name__
                     except:
@@ -100,9 +98,10 @@ class LogIPMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        client_ip, _ = get_client_ip(request)
+        ipw = IpWare()
+        client_ip, _ = ipw.get_client_ip(request.META)
 
-        request._client_ip = client_ip
+        request._client_ip = str(client_ip) if client_ip else ""
         response = self.get_response(request)
         return response
 

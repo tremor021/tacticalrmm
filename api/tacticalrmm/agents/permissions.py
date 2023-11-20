@@ -47,13 +47,6 @@ class UpdateAgentPerms(permissions.BasePermission):
         return _has_perm(r, "can_update_agents")
 
 
-class PingAgentPerms(permissions.BasePermission):
-    def has_permission(self, r, view) -> bool:
-        return _has_perm(r, "can_ping_agents") and _has_perm_on_agent(
-            r.user, view.kwargs["agent_id"]
-        )
-
-
 class ManageProcPerms(permissions.BasePermission):
     def has_permission(self, r, view) -> bool:
         return _has_perm(r, "can_manage_procs") and _has_perm_on_agent(
@@ -96,10 +89,8 @@ class RunScriptPerms(permissions.BasePermission):
 
 class AgentNotesPerms(permissions.BasePermission):
     def has_permission(self, r, view) -> bool:
-
         # permissions for GET /agents/notes/ endpoint
         if r.method == "GET":
-
             # permissions for /agents/<agent_id>/notes endpoint
             if "agent_id" in view.kwargs.keys():
                 return _has_perm(r, "can_list_notes") and _has_perm_on_agent(
@@ -124,3 +115,13 @@ class AgentHistoryPerms(permissions.BasePermission):
             )
 
         return _has_perm(r, "can_list_agent_history")
+
+
+class AgentWOLPerms(permissions.BasePermission):
+    def has_permission(self, r, view) -> bool:
+        if "agent_id" in view.kwargs.keys():
+            return _has_perm(r, "can_send_wol") and _has_perm_on_agent(
+                r.user, view.kwargs["agent_id"]
+            )
+
+        return _has_perm(r, "can_send_wol")

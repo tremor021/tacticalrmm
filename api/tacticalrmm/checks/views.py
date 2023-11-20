@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime as dt
 
-from django.db.models import Q
+from django.db.models import Prefetch, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone as djangotime
 from rest_framework.decorators import api_view, permission_classes
@@ -13,12 +13,14 @@ from rest_framework.views import APIView
 from agents.models import Agent
 from alerts.models import Alert
 from automation.models import Policy
-from tacticalrmm.constants import CheckStatus, CheckType
+from tacticalrmm.constants import AGENT_DEFER, CheckStatus, CheckType
+from tacticalrmm.exceptions import NatsDown
 from tacticalrmm.helpers import notify_error
+from tacticalrmm.nats_utils import abulk_nats_command
 from tacticalrmm.permissions import _has_perm_on_agent
 
 from .models import Check, CheckHistory, CheckResult
-from .permissions import ChecksPerms, RunChecksPerms
+from .permissions import BulkRunChecksPerms, ChecksPerms, RunChecksPerms
 from .serializers import CheckHistorySerializer, CheckSerializer
 
 
@@ -37,7 +39,6 @@ class GetAddChecks(APIView):
         return Response(CheckSerializer(checks, many=True).data)
 
     def post(self, request):
-
         data = request.data.copy()
         # Determine if adding check to Agent and replace agent_id with pk
         if "agent" in data.keys():
@@ -121,13 +122,52 @@ class ResetCheck(APIView):
         result.save()
 
         # resolve any alerts that are open
-        alert = Alert.create_or_return_check_alert(
+        if alert := Alert.create_or_return_check_alert(
             result.assigned_check, agent=result.agent, skip_create=True
-        )
-        if alert:
+        ):
             alert.resolve()
 
         return Response("The check status was reset")
+
+
+class ResetAllChecksStatus(APIView):
+    permission_classes = [IsAuthenticated, ChecksPerms]
+
+    def post(self, request, agent_id):
+        agent = get_object_or_404(
+            Agent.objects.defer(*AGENT_DEFER)
+            .select_related(
+                "policy",
+                "policy__alert_template",
+                "alert_template",
+            )
+            .prefetch_related(
+                Prefetch(
+                    "checkresults",
+                    queryset=CheckResult.objects.select_related("assigned_check"),
+                ),
+                "agentchecks",
+            ),
+            agent_id=agent_id,
+        )
+
+        if not _has_perm_on_agent(request.user, agent.agent_id):
+            raise PermissionDenied()
+
+        for check in agent.get_checks_with_policies():
+            try:
+                result = check.check_result
+                result.status = CheckStatus.PASSING
+                result.save()
+                if alert := Alert.create_or_return_check_alert(
+                    result.assigned_check, agent=agent, skip_create=True
+                ):
+                    alert.resolve()
+            except:
+                # check hasn't run yet, no check result entry
+                continue
+
+        return Response("All checks status were reset")
 
 
 class GetCheckHistory(APIView):
@@ -169,6 +209,37 @@ def run_checks(request, agent_id):
     if r == "busy":
         return notify_error(f"Checks are already running on {agent.hostname}")
     elif r == "ok":
-        return Response(f"Checks will now be re-run on {agent.hostname}")
+        return Response(f"Checks will now be run on {agent.hostname}")
 
     return notify_error("Unable to contact the agent")
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, BulkRunChecksPerms])
+def bulk_run_checks(request, target, pk):
+    q = Q()
+    match target:
+        case "client":
+            q = Q(site__client__id=pk)
+        case "site":
+            q = Q(site__id=pk)
+
+    agent_ids = list(
+        Agent.objects.only("agent_id", "site")
+        .filter(q)
+        .values_list("agent_id", flat=True)
+    )
+
+    if not agent_ids:
+        return notify_error("No agents matched query")
+
+    payload = {"func": "runchecks"}
+    items = [(agent_id, payload) for agent_id in agent_ids]
+
+    try:
+        asyncio.run(abulk_nats_command(items=items))
+    except NatsDown as e:
+        return notify_error(str(e))
+
+    ret = f"Checks will now be run on {len(agent_ids)} agents"
+    return Response(ret)

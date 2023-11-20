@@ -9,7 +9,6 @@ from tacticalrmm.permissions import _has_perm_on_agent
 
 class SendCMD(AsyncJsonWebsocketConsumer):
     async def connect(self):
-
         self.user = self.scope["user"]
 
         if isinstance(self.user, AnonymousUser):
@@ -48,7 +47,7 @@ class SendCMD(AsyncJsonWebsocketConsumer):
         await self.send_json({"ret": ret})
 
     async def disconnect(self, _):
-        await self.close()
+        pass
 
     def _has_perm(self, perm: str) -> bool:
         if self.user.is_superuser or (

@@ -3,13 +3,14 @@ from django.conf import settings
 from django.contrib.auth import login
 from django.db import IntegrityError
 from django.shortcuts import get_object_or_404
-from ipware import get_client_ip
 from knox.views import LoginView as KnoxLoginView
+from python_ipware import IpWare
 from rest_framework.authtoken.serializers import AuthTokenSerializer
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.utils import is_root_user
 from logs.models import AuditLog
 from tacticalrmm.helpers import notify_error
 
@@ -22,15 +23,12 @@ from .serializers import (
     UserSerializer,
     UserUISerializer,
 )
-from accounts.utils import is_root_user
 
 
 class CheckCreds(KnoxLoginView):
-
     permission_classes = (AllowAny,)
 
     def post(self, request, format=None):
-
         # check credentials
         serializer = AuthTokenSerializer(data=request.data)
         if not serializer.is_valid():
@@ -55,7 +53,6 @@ class CheckCreds(KnoxLoginView):
 
 
 class LoginView(KnoxLoginView):
-
     permission_classes = (AllowAny,)
 
     def post(self, request, format=None):
@@ -82,9 +79,11 @@ class LoginView(KnoxLoginView):
             login(request, user)
 
             # save ip information
-            client_ip, _ = get_client_ip(request)
-            user.last_login_ip = client_ip
-            user.save()
+            ipw = IpWare()
+            client_ip, _ = ipw.get_client_ip(request.META)
+            if client_ip:
+                user.last_login_ip = str(client_ip)
+                user.save()
 
             AuditLog.audit_user_login_successful(
                 request.data["username"], debug_info={"ip": request._client_ip}
@@ -169,6 +168,7 @@ class GetUpdateDeleteUser(APIView):
 
 class UserActions(APIView):
     permission_classes = [IsAuthenticated, AccountsPerms]
+
     # reset password
     def post(self, request):
         user = get_object_or_404(User, pk=request.data["id"])
@@ -195,10 +195,8 @@ class UserActions(APIView):
 
 
 class TOTPSetup(APIView):
-
     # totp setup
     def post(self, request):
-
         user = request.user
         if not user.totp_key:
             code = pyotp.random_base32()
@@ -267,7 +265,7 @@ class GetAddAPIKeys(APIView):
         request.data["key"] = get_random_string(length=32).upper()
         serializer = APIKeySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        obj = serializer.save()
+        serializer.save()
         return Response("The API Key was added")
 
 
@@ -290,3 +288,23 @@ class GetUpdateDeleteAPIKey(APIView):
         apikey = get_object_or_404(APIKey, pk=pk)
         apikey.delete()
         return Response("The API Key was deleted")
+
+
+class ResetPass(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def put(self, request):
+        user = request.user
+        user.set_password(request.data["password"])
+        user.save()
+        return Response("Password was reset.")
+
+
+class Reset2FA(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def put(self, request):
+        user = request.user
+        user.totp_key = ""
+        user.save()
+        return Response("2FA was reset. Log out and back in to setup.")

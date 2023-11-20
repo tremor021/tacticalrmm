@@ -98,6 +98,12 @@ class Check(BaseAuditModel):
         blank=True,
         default=list,
     )
+    env_vars = ArrayField(
+        models.TextField(null=True, blank=True),
+        null=True,
+        blank=True,
+        default=list,
+    )
     info_return_codes = ArrayField(
         models.PositiveIntegerField(),
         null=True,
@@ -153,7 +159,6 @@ class Check(BaseAuditModel):
         return f"{self.policy.name} - {self.readable_desc}"
 
     def save(self, *args, **kwargs):
-
         # if check is a policy check clear cache on everything
         if self.policy:
             cache.delete_many_pattern("site_*_checks")
@@ -169,7 +174,6 @@ class Check(BaseAuditModel):
         )
 
     def delete(self, *args, **kwargs):
-
         # if check is a policy check clear cache on everything
         if self.policy:
             cache.delete_many_pattern("site_*_checks")
@@ -188,7 +192,6 @@ class Check(BaseAuditModel):
     def readable_desc(self):
         display = self.get_check_type_display()  # type: ignore
         if self.check_type == CheckType.DISK_SPACE:
-
             text = ""
             if self.warning_threshold:
                 text += f" Warning Threshold: {self.warning_threshold}%"
@@ -220,9 +223,6 @@ class Check(BaseAuditModel):
         return CHECKS_NON_EDITABLE_FIELDS
 
     def create_policy_check(self, policy: "Policy") -> None:
-
-        fields_to_copy = POLICY_CHECK_FIELDS_TO_COPY
-
         check = Check.objects.create(
             policy=policy,
         )
@@ -230,13 +230,12 @@ class Check(BaseAuditModel):
         for task in self.assignedtasks.all():  # type: ignore
             task.create_policy_task(policy=policy, assigned_check=check)
 
-        for field in fields_to_copy:
+        for field in POLICY_CHECK_FIELDS_TO_COPY:
             setattr(check, field, getattr(self, field))
 
         check.save()
 
     def should_create_alert(self, alert_template=None):
-
         return (
             self.dashboard_alert
             or self.email_alert
@@ -330,7 +329,6 @@ class CheckResult(models.Model):
         return f"{self.agent.hostname} - {self.assigned_check}"
 
     def save(self, *args, **kwargs):
-
         # if check is a policy check clear cache on everything
         if not self.alert_severity and self.assigned_check.check_type in (
             CheckType.MEMORY,
@@ -368,7 +366,6 @@ class CheckResult(models.Model):
         update_fields = []
         # cpuload or mem checks
         if check.check_type in (CheckType.CPU_LOAD, CheckType.MEMORY):
-
             self.history.append(data["percent"])
 
             if len(self.history) > 15:
@@ -533,7 +530,6 @@ class CheckResult(models.Model):
         return self.status
 
     def send_email(self):
-
         CORE = get_core_settings()
 
         body: str = ""
@@ -562,14 +558,12 @@ class CheckResult(models.Model):
                 body = subject + f" - Disk {self.assigned_check.disk} does not exist"
 
         elif self.assigned_check.check_type == CheckType.SCRIPT:
-
             body = (
                 subject
                 + f" - Return code: {self.retcode}\nStdout:{self.stdout}\nStderr: {self.stderr}"
             )
 
         elif self.assigned_check.check_type == CheckType.PING:
-
             body = self.more_info
 
         elif self.assigned_check.check_type in (CheckType.CPU_LOAD, CheckType.MEMORY):
@@ -591,7 +585,6 @@ class CheckResult(models.Model):
             body = subject + f" - Status: {self.more_info}"
 
         elif self.assigned_check.check_type == CheckType.EVENT_LOG:
-
             if self.assigned_check.event_source and self.assigned_check.event_message:
                 start = f"Event ID {self.assigned_check.event_id}, source {self.assigned_check.event_source}, containing string {self.assigned_check.event_message} "
             elif self.assigned_check.event_source:
@@ -613,7 +606,6 @@ class CheckResult(models.Model):
         CORE.send_mail(subject, body, alert_template=self.agent.alert_template)
 
     def send_sms(self):
-
         CORE = get_core_settings()
         body: str = ""
 

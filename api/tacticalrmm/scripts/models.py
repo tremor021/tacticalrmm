@@ -9,7 +9,7 @@ from django.db.models.fields import CharField, TextField
 
 from logs.models import BaseAuditModel
 from tacticalrmm.constants import ScriptShell, ScriptType
-from tacticalrmm.utils import replace_db_values
+from tacticalrmm.utils import replace_arg_db_values
 
 
 class Script(BaseAuditModel):
@@ -24,6 +24,12 @@ class Script(BaseAuditModel):
         max_length=100, choices=ScriptType.choices, default=ScriptType.USER_DEFINED
     )
     args = ArrayField(
+        models.TextField(null=True, blank=True),
+        null=True,
+        blank=True,
+        default=list,
+    )
+    env_vars = ArrayField(
         models.TextField(null=True, blank=True),
         null=True,
         blank=True,
@@ -188,8 +194,8 @@ class Script(BaseAuditModel):
         return ScriptSerializer(script).data
 
     @classmethod
+    # TODO refactor common functionality of parse functions
     def parse_script_args(cls, agent, shell: str, args: List[str] = []) -> list:
-
         if not args:
             return []
 
@@ -199,19 +205,23 @@ class Script(BaseAuditModel):
         pattern = re.compile(".*\\{\\{(.*)\\}\\}.*")
 
         for arg in args:
-            match = pattern.match(arg)
-            if match:
+            if match := pattern.match(arg):
                 # only get the match between the () in regex
                 string = match.group(1)
-                value = replace_db_values(
+                value = replace_arg_db_values(
                     string=string,
                     instance=agent,
                     shell=shell,
-                    quotes=True if shell != ScriptShell.CMD else False,
+                    quotes=shell != ScriptShell.CMD,
                 )
 
                 if value:
-                    temp_args.append(re.sub("\\{\\{.*\\}\\}", value, arg))
+                    try:
+                        temp_args.append(re.sub("\\{\\{.*\\}\\}", value, arg))
+                    except re.error:
+                        temp_args.append(
+                            re.sub("\\{\\{.*\\}\\}", re.escape(value), arg)
+                        )
                 else:
                     # pass parameter unaltered
                     temp_args.append(arg)
@@ -220,6 +230,42 @@ class Script(BaseAuditModel):
                 temp_args.append(arg)
 
         return temp_args
+
+    @classmethod
+    # TODO refactor common functionality of parse functions
+    def parse_script_env_vars(cls, agent, shell: str, env_vars: list[str] = []) -> list:
+        if not env_vars:
+            return []
+
+        temp_env_vars = []
+        pattern = re.compile(".*\\{\\{(.*)\\}\\}.*")
+        for env_var in env_vars:
+            # must be in format KEY=VALUE
+            try:
+                env_key = env_var.split("=")[0]
+                env_val = env_var.split("=")[1]
+            except:
+                continue
+            if match := pattern.match(env_val):
+                string = match.group(1)
+                value = replace_arg_db_values(
+                    string=string,
+                    instance=agent,
+                    shell=shell,
+                    quotes=False,
+                )
+
+                if value:
+                    try:
+                        new_val = re.sub("\\{\\{.*\\}\\}", value, env_val)
+                    except re.error:
+                        new_val = re.sub("\\{\\{.*\\}\\}", re.escape(value), env_val)
+                    temp_env_vars.append(f"{env_key}={new_val}")
+            else:
+                # pass parameter unaltered
+                temp_env_vars.append(env_var)
+
+        return temp_env_vars
 
 
 class ScriptSnippet(models.Model):

@@ -22,7 +22,6 @@ class CheckResultSerializer(serializers.ModelSerializer):
 
 
 class CheckSerializer(serializers.ModelSerializer):
-
     readable_desc = serializers.ReadOnlyField()
     assignedtasks = AssignedTaskField(many=True, read_only=True)
     alert_template = serializers.SerializerMethodField()
@@ -82,7 +81,7 @@ class CheckSerializer(serializers.ModelSerializer):
 
             if not val["warning_threshold"] and not val["error_threshold"]:
                 raise serializers.ValidationError(
-                    f"Warning threshold or Error Threshold must be set"
+                    "Warning threshold or Error Threshold must be set"
                 )
 
             if (
@@ -91,7 +90,7 @@ class CheckSerializer(serializers.ModelSerializer):
                 and val["error_threshold"] > 0
             ):
                 raise serializers.ValidationError(
-                    f"Warning threshold must be greater than Error Threshold"
+                    "Warning threshold must be greater than Error Threshold"
                 )
 
         # ping checks
@@ -113,7 +112,7 @@ class CheckSerializer(serializers.ModelSerializer):
 
             if not val["warning_threshold"] and not val["error_threshold"]:
                 raise serializers.ValidationError(
-                    f"Warning threshold or Error Threshold must be set"
+                    "Warning threshold or Error Threshold must be set"
                 )
 
             if (
@@ -122,7 +121,7 @@ class CheckSerializer(serializers.ModelSerializer):
                 and val["error_threshold"] > 0
             ):
                 raise serializers.ValidationError(
-                    f"Warning threshold must be less than Error Threshold"
+                    "Warning threshold must be less than Error Threshold"
                 )
 
         if check_type == CheckType.MEMORY and not self.instance:
@@ -133,7 +132,7 @@ class CheckSerializer(serializers.ModelSerializer):
 
             if not val["warning_threshold"] and not val["error_threshold"]:
                 raise serializers.ValidationError(
-                    f"Warning threshold or Error Threshold must be set"
+                    "Warning threshold or Error Threshold must be set"
                 )
 
             if (
@@ -142,7 +141,7 @@ class CheckSerializer(serializers.ModelSerializer):
                 and val["error_threshold"] > 0
             ):
                 raise serializers.ValidationError(
-                    f"Warning threshold must be less than Error Threshold"
+                    "Warning threshold must be less than Error Threshold"
                 )
 
         return val
@@ -158,6 +157,7 @@ class CheckRunnerGetSerializer(serializers.ModelSerializer):
     # only send data needed for agent to run a check
     script = ScriptCheckSerializer(read_only=True)
     script_args = serializers.SerializerMethodField()
+    env_vars = serializers.SerializerMethodField()
 
     def get_script_args(self, obj):
         if obj.check_type != CheckType.SCRIPT:
@@ -166,6 +166,19 @@ class CheckRunnerGetSerializer(serializers.ModelSerializer):
         agent = self.context["agent"] if "agent" in self.context.keys() else obj.agent
         return Script.parse_script_args(
             agent=agent, shell=obj.script.shell, args=obj.script_args
+        )
+
+    def get_env_vars(self, obj):
+        if obj.check_type != CheckType.SCRIPT:
+            return []
+
+        agent = self.context["agent"] if "agent" in self.context.keys() else obj.agent
+
+        return Script.parse_script_env_vars(
+            agent=agent,
+            shell=obj.script.shell,
+            env_vars=obj.env_vars
+            or obj.script.env_vars,  # check's env_vars override the script's env vars
         )
 
     class Meta:
