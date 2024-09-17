@@ -1,3 +1,4 @@
+from django.conf import settings
 from rest_framework import serializers
 
 from tacticalrmm.constants import ALL_TIMEZONES
@@ -5,7 +6,21 @@ from tacticalrmm.constants import ALL_TIMEZONES
 from .models import CodeSignToken, CoreSettings, CustomField, GlobalKVStore, URLAction
 
 
-class CoreSettingsSerializer(serializers.ModelSerializer):
+class HostedCoreMixin:
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)  # type: ignore
+        if getattr(settings, "HOSTED", False):
+            for field in ("mesh_site", "mesh_token", "mesh_username"):
+                ret[field] = "n/a"
+
+            ret["sync_mesh_with_trmm"] = True
+            ret["enable_server_scripts"] = False
+            ret["enable_server_webterminal"] = False
+
+        return ret
+
+
+class CoreSettingsSerializer(HostedCoreMixin, serializers.ModelSerializer):
     all_timezones = serializers.SerializerMethodField("all_time_zones")
 
     def all_time_zones(self, obj):
@@ -17,7 +32,7 @@ class CoreSettingsSerializer(serializers.ModelSerializer):
 
 
 # for audting
-class CoreSerializer(serializers.ModelSerializer):
+class CoreSerializer(HostedCoreMixin, serializers.ModelSerializer):
     class Meta:
         model = CoreSettings
         fields = "__all__"

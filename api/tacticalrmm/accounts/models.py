@@ -64,6 +64,15 @@ class User(AbstractUser, BaseAuditModel):
         on_delete=models.SET_NULL,
     )
 
+    @property
+    def mesh_user_id(self):
+        return f"user//{self.mesh_username}"
+
+    @property
+    def mesh_username(self):
+        # lower() needed for mesh api
+        return f"{self.username.replace(' ', '').lower()}___{self.pk}"
+
     @staticmethod
     def serialize(user):
         # serializes the task and returns json
@@ -120,6 +129,8 @@ class Role(BaseAuditModel):
     can_run_urlactions = models.BooleanField(default=False)
     can_view_customfields = models.BooleanField(default=False)
     can_manage_customfields = models.BooleanField(default=False)
+    can_run_server_scripts = models.BooleanField(default=False)
+    can_use_webterm = models.BooleanField(default=False)
 
     # checks
     can_list_checks = models.BooleanField(default=False)
@@ -195,7 +206,7 @@ class Role(BaseAuditModel):
     def save(self, *args, **kwargs) -> None:
         # delete cache on save
         cache.delete(f"{ROLE_CACHE_PREFIX}{self.name}")
-        super(BaseAuditModel, self).save(*args, **kwargs)
+        super().save(*args, **kwargs)
 
     @staticmethod
     def serialize(role):

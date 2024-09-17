@@ -1,5 +1,6 @@
 import asyncio
 
+from django.conf import settings
 from django.shortcuts import get_object_or_404
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -7,6 +8,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from agents.permissions import RunScriptPerms
+from core.utils import clear_entire_cache
+from logs.models import AuditLog
 from tacticalrmm.constants import ScriptShell, ScriptType
 from tacticalrmm.helpers import notify_error
 
@@ -17,7 +20,6 @@ from .serializers import (
     ScriptSnippetSerializer,
     ScriptTableSerializer,
 )
-from core.utils import clear_entire_cache
 
 
 class GetAddScripts(APIView):
@@ -152,20 +154,31 @@ class TestScript(APIView):
             agent, request.data["shell"], request.data["env_vars"]
         )
 
+        script_body = Script.replace_with_snippets(request.data["code"])
+
         data = {
-            "func": "runscript",
+            "func": "runscriptfull",
             "timeout": request.data["timeout"],
             "script_args": parsed_args,
             "payload": {
-                "code": Script.replace_with_snippets(request.data["code"]),
+                "code": script_body,
                 "shell": request.data["shell"],
             },
             "run_as_user": request.data["run_as_user"],
             "env_vars": parsed_env_vars,
+            "nushell_enable_config": settings.NUSHELL_ENABLE_CONFIG,
+            "deno_default_permissions": settings.DENO_DEFAULT_PERMISSIONS,
         }
 
         r = asyncio.run(
             agent.nats_cmd(data, timeout=request.data["timeout"], wait=True)
+        )
+
+        AuditLog.audit_test_script_run(
+            username=request.user.username,
+            agent=agent,
+            script_body=script_body,
+            debug_info={"ip": request._client_ip},
         )
 
         return Response(r)
@@ -190,6 +203,10 @@ def download(request, pk):
             ext = ".py"
         case ScriptShell.SHELL:
             ext = ".sh"
+        case ScriptShell.NUSHELL:
+            ext = ".nu"
+        case ScriptShell.DENO:
+            ext = ".ts"
         case _:
             ext = ""
 

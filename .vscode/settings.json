@@ -5,27 +5,10 @@
   "python.analysis.diagnosticSeverityOverrides": {
     "reportUnusedImport": "error",
     "reportDuplicateImport": "error",
-    "reportGeneralTypeIssues": "none"
+    "reportGeneralTypeIssues": "none",
+    "reportOptionalMemberAccess": "none",
   },
   "python.analysis.typeCheckingMode": "basic",
-  "python.linting.enabled": true,
-  "python.linting.mypyEnabled": true,
-  "python.linting.mypyArgs": [
-    "--ignore-missing-imports",
-    "--follow-imports=silent",
-    "--show-column-numbers",
-    "--strict"
-  ],
-  "python.linting.ignorePatterns": [
-    "**/site-packages/**/*.py",
-    ".vscode/*.py",
-    "**env/**"
-  ],
-  "python.formatting.provider": "none",
-  //"mypy.targets": [
-  //"api/tacticalrmm"
-  //],
-  //"mypy.runUsingActiveInterpreter": true,
   "editor.bracketPairColorization.enabled": true,
   "editor.guides.bracketPairs": true,
   "editor.formatOnSave": true,
@@ -34,7 +17,6 @@
     "**/docker/**/docker-compose*.yml": "dockercompose"
   },
   "files.watcherExclude": {
-    "files.watcherExclude": {
       "**/.git/objects/**": true,
       "**/.git/subtree-cache/**": true,
       "**/node_modules/": true,
@@ -53,18 +35,17 @@
       "**/*.parquet*": true,
       "**/*.pyc": true,
       "**/*.zip": true
-    }
   },
   "go.useLanguageServer": true,
   "[go]": {
     "editor.codeActionsOnSave": {
-      "source.organizeImports": false
+      "source.organizeImports": "never"
     },
     "editor.snippetSuggestions": "none"
   },
   "[go.mod]": {
     "editor.codeActionsOnSave": {
-      "source.organizeImports": true
+      "source.organizeImports": "explicit"
     }
   },
   "gopls": {

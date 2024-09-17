@@ -1,6 +1,7 @@
 import zoneinfo
 from enum import Enum
 
+from django.conf import settings
 from django.db import models
 
 
@@ -30,6 +31,10 @@ RESOLVE_ALERTS_LOCK = "resolve-alerts-lock-key"
 SYNC_SCHED_TASK_LOCK = "sync-sched-tasks-lock-key"
 AGENT_OUTAGES_LOCK = "agent-outages-task-lock-key"
 ORPHANED_WIN_TASK_LOCK = "orphaned-win-task-lock-key"
+SYNC_MESH_PERMS_TASK_LOCK = "sync-mesh-perms-lock-key"
+
+TRMM_WS_MAX_SIZE = getattr(settings, "TRMM_WS_MAX_SIZE", 100 * 2**20)
+TRMM_MAX_REQUEST_SIZE = getattr(settings, "TRMM_MAX_REQUEST_SIZE", 10 * 2**20)
 
 
 class GoArch(models.TextChoices):
@@ -75,6 +80,7 @@ class TaskType(models.TextChoices):
     CHECK_FAILURE = "checkfailure", "On Check Failure"
     MANUAL = "manual", "Manual"
     RUN_ONCE = "runonce", "Run Once"
+    ONBOARDING = "onboarding", "Onboarding"
     SCHEDULED = "scheduled", "Scheduled"  # deprecated
 
 
@@ -89,6 +95,12 @@ class AlertType(models.TextChoices):
     CHECK = "check", "Check"
     TASK = "task", "Task"
     CUSTOM = "custom", "Custom"
+
+
+class AlertTemplateActionType(models.TextChoices):
+    SCRIPT = "script", "Script"
+    SERVER = "server", "Server"
+    REST = "rest", "Rest"
 
 
 class AgentHistoryType(models.TextChoices):
@@ -131,6 +143,8 @@ class ScriptShell(models.TextChoices):
     CMD = "cmd", "Batch (CMD)"
     PYTHON = "python", "Python"
     SHELL = "shell", "Shell"
+    NUSHELL = "nushell", "Nushell"
+    DENO = "deno", "Deno"
 
 
 class ScriptType(models.TextChoices):
@@ -237,6 +251,19 @@ class DebugLogType(models.TextChoices):
     WIN_UPDATES = "win_updates", "Windows Updates"
     SYSTEM_ISSUES = "system_issues", "System Issues"
     SCRIPTING = "scripting", "Scripting"
+
+
+class URLActionType(models.TextChoices):
+    WEB = "web", "Web"
+    REST = "rest", "Rest"
+
+
+class URLActionRestMethod(models.TextChoices):
+    GET = "get", "Get"
+    POST = "post", "Post"
+    PUT = "put", "Put"
+    DELETE = "delete", "Delete"
+    PATCH = "patch", "Patch"
 
 
 # Agent db fields that are not needed for most queries, speeds up query

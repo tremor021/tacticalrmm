@@ -1,3 +1,5 @@
+import datetime
+
 import pyotp
 from django.conf import settings
 from django.contrib.auth import login
@@ -11,6 +13,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.utils import is_root_user
+from core.tasks import sync_mesh_perms_task
 from logs.models import AuditLog
 from tacticalrmm.helpers import notify_error
 
@@ -25,7 +28,87 @@ from .serializers import (
 )
 
 
+class CheckCredsV2(KnoxLoginView):
+    permission_classes = (AllowAny,)
+
+    # restrict time on tokens issued by this view to 3 min
+    def get_token_ttl(self):
+        return datetime.timedelta(seconds=180)
+
+    def post(self, request, format=None):
+        # check credentials
+        serializer = AuthTokenSerializer(data=request.data)
+        if not serializer.is_valid():
+            AuditLog.audit_user_failed_login(
+                request.data["username"], debug_info={"ip": request._client_ip}
+            )
+            return notify_error("Bad credentials")
+
+        user = serializer.validated_data["user"]
+
+        if user.block_dashboard_login:
+            return notify_error("Bad credentials")
+
+        # if totp token not set modify response to notify frontend
+        if not user.totp_key:
+            login(request, user)
+            response = super().post(request, format=None)
+            response.data["totp"] = False
+            return response
+
+        return Response({"totp": True})
+
+
+class LoginViewV2(KnoxLoginView):
+    permission_classes = (AllowAny,)
+
+    def post(self, request, format=None):
+        valid = False
+
+        serializer = AuthTokenSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.validated_data["user"]
+
+        if user.block_dashboard_login:
+            return notify_error("Bad credentials")
+
+        token = request.data["twofactor"]
+        totp = pyotp.TOTP(user.totp_key)
+
+        if settings.DEBUG and token == "sekret":
+            valid = True
+        elif getattr(settings, "DEMO", False):
+            valid = True
+        elif totp.verify(token, valid_window=10):
+            valid = True
+
+        if valid:
+            login(request, user)
+
+            # save ip information
+            ipw = IpWare()
+            client_ip, _ = ipw.get_client_ip(request.META)
+            if client_ip:
+                user.last_login_ip = str(client_ip)
+                user.save()
+
+            AuditLog.audit_user_login_successful(
+                request.data["username"], debug_info={"ip": request._client_ip}
+            )
+            response = super().post(request, format=None)
+            response.data["username"] = request.user.username
+            return Response(response.data)
+        else:
+            AuditLog.audit_user_failed_twofactor(
+                request.data["username"], debug_info={"ip": request._client_ip}
+            )
+            return notify_error("Bad credentials")
+
+
 class CheckCreds(KnoxLoginView):
+    # TODO
+    # This view is deprecated as of 0.19.0
+    # Needed for the initial update to 0.19.0 so frontend code doesn't break on login
     permission_classes = (AllowAny,)
 
     def post(self, request, format=None):
@@ -53,6 +136,9 @@ class CheckCreds(KnoxLoginView):
 
 
 class LoginView(KnoxLoginView):
+    # TODO
+    # This view is deprecated as of 0.19.0
+    # Needed for the initial update to 0.19.0 so frontend code doesn't break on login
     permission_classes = (AllowAny,)
 
     def post(self, request, format=None):
@@ -133,6 +219,7 @@ class GetAddUsers(APIView):
             user.role = role
 
         user.save()
+        sync_mesh_perms_task.delay()
         return Response(user.username)
 
 
@@ -153,6 +240,7 @@ class GetUpdateDeleteUser(APIView):
         serializer = UserSerializer(instance=user, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        sync_mesh_perms_task.delay()
 
         return Response("ok")
 
@@ -162,7 +250,7 @@ class GetUpdateDeleteUser(APIView):
             return notify_error("The root user cannot be deleted from the UI")
 
         user.delete()
-
+        sync_mesh_perms_task.delay()
         return Response("ok")
 
 
@@ -204,7 +292,7 @@ class TOTPSetup(APIView):
             user.save(update_fields=["totp_key"])
             return Response(TOTPSetupSerializer(user).data)
 
-        return Response("totp token already set")
+        return Response(False)
 
 
 class UserUI(APIView):
@@ -243,11 +331,13 @@ class GetUpdateDeleteRole(APIView):
         serializer = RoleSerializer(instance=role, data=request.data)
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        sync_mesh_perms_task.delay()
         return Response("Role was edited")
 
     def delete(self, request, pk):
         role = get_object_or_404(Role, pk=pk)
         role.delete()
+        sync_mesh_perms_task.delay()
         return Response("Role was removed")
 
 

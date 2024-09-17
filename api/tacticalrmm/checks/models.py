@@ -19,6 +19,7 @@ from tacticalrmm.constants import (
     EvtLogNames,
     EvtLogTypes,
 )
+from tacticalrmm.helpers import has_script_actions, has_webhook
 from tacticalrmm.models import PermissionQuerySet
 
 if TYPE_CHECKING:
@@ -168,10 +169,7 @@ class Check(BaseAuditModel):
         elif self.agent:
             cache.delete(f"agent_{self.agent.agent_id}_checks")
 
-        super(Check, self).save(
-            *args,
-            **kwargs,
-        )
+        super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
         # if check is a policy check clear cache on everything
@@ -183,10 +181,7 @@ class Check(BaseAuditModel):
         elif self.agent:
             cache.delete(f"agent_{self.agent.agent_id}_checks")
 
-        super(Check, self).delete(
-            *args,
-            **kwargs,
-        )
+        super().delete(*args, **kwargs)
 
     @property
     def readable_desc(self):
@@ -236,18 +231,19 @@ class Check(BaseAuditModel):
         check.save()
 
     def should_create_alert(self, alert_template=None):
+        has_check_notifications = (
+            self.dashboard_alert or self.email_alert or self.text_alert
+        )
+        has_alert_template_notification = alert_template and (
+            alert_template.check_always_alert
+            or alert_template.check_always_email
+            or alert_template.check_always_text
+        )
         return (
-            self.dashboard_alert
-            or self.email_alert
-            or self.text_alert
-            or (
-                alert_template
-                and (
-                    alert_template.check_always_alert
-                    or alert_template.check_always_email
-                    or alert_template.check_always_text
-                )
-            )
+            has_check_notifications
+            or has_alert_template_notification
+            or has_webhook(alert_template, "check")
+            or has_script_actions(alert_template, "check")
         )
 
     def add_check_history(
@@ -290,6 +286,7 @@ class CheckResult(models.Model):
     class Meta:
         unique_together = (("agent", "assigned_check"),)
 
+    id = models.BigAutoField(primary_key=True)
     agent = models.ForeignKey(
         "agents.Agent",
         related_name="checkresults",
@@ -338,10 +335,7 @@ class CheckResult(models.Model):
         ):
             self.alert_severity = AlertSeverity.WARNING
 
-        super(CheckResult, self).save(
-            *args,
-            **kwargs,
-        )
+        super().save(*args, **kwargs)
 
     @property
     def history_info(self):
@@ -673,6 +667,7 @@ class CheckResult(models.Model):
 class CheckHistory(models.Model):
     objects = PermissionQuerySet.as_manager()
 
+    id = models.BigAutoField(primary_key=True)
     check_id = models.PositiveIntegerField(default=0)
     agent_id = models.CharField(max_length=200, null=True, blank=True)
     x = models.DateTimeField(auto_now_add=True)

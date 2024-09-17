@@ -14,10 +14,10 @@ jobs:
     name: Tests
     strategy:
       matrix:
-        python-version: ["3.11.6"]
+        python-version: ["3.11.8"]
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - uses: harmon758/postgresql-action@v1
         with:

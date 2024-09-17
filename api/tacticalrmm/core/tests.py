@@ -1,3 +1,4 @@
+import os
 from unittest.mock import patch
 
 import requests
@@ -11,16 +12,15 @@ from model_bakery import baker
 from rest_framework.authtoken.models import Token
 
 # from agents.models import Agent
-from core.utils import get_core_settings, get_meshagent_url
+from core.utils import get_core_settings, get_mesh_ws_url, get_meshagent_url
 
 # from logs.models import PendingAction
-from tacticalrmm.constants import (
+from tacticalrmm.constants import (  # PAAction,; PAStatus,
     CONFIG_MGMT_CMDS,
     CustomFieldModel,
     MeshAgentIdent,
-    # PAAction,
-    # PAStatus,
 )
+from tacticalrmm.helpers import get_nats_hosts, get_nats_url
 from tacticalrmm.test import TacticalTestCase
 
 from .consumers import DashInfo
@@ -110,18 +110,63 @@ class TestCoreTasks(TacticalTestCase):
 
     def test_edit_coresettings(self):
         url = "/core/settings/"
-
         # setup
         baker.make("automation.Policy", _quantity=2)
         # test normal request
         data = {
             "smtp_from_email": "newexample@example.com",
             "mesh_token": "New_Mesh_Token",
+            "mesh_site": "https://mesh.example.com",
+            "mesh_username": "bob",
+            "sync_mesh_with_trmm": False,
         }
         r = self.client.put(url, data)
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(get_core_settings().smtp_from_email, data["smtp_from_email"])
-        self.assertEqual(get_core_settings().mesh_token, data["mesh_token"])
+        core = get_core_settings()
+        self.assertEqual(core.smtp_from_email, "newexample@example.com")
+        self.assertEqual(core.mesh_token, "New_Mesh_Token")
+        self.assertEqual(core.mesh_site, "https://mesh.example.com")
+        self.assertEqual(core.mesh_username, "bob")
+        self.assertFalse(core.sync_mesh_with_trmm)
+
+        # test to_representation
+        r = self.client.get(url)
+        self.assertEqual(r.data["smtp_from_email"], "newexample@example.com")
+        self.assertEqual(r.data["mesh_token"], "New_Mesh_Token")
+        self.assertEqual(r.data["mesh_site"], "https://mesh.example.com")
+        self.assertEqual(r.data["mesh_username"], "bob")
+        self.assertFalse(r.data["sync_mesh_with_trmm"])
+
+        self.check_not_authenticated("put", url)
+
+    @override_settings(HOSTED=True)
+    def test_hosted_edit_coresettings(self):
+        url = "/core/settings/"
+        baker.make("automation.Policy", _quantity=2)
+        data = {
+            "smtp_from_email": "newexample1@example.com",
+            "mesh_token": "abc123",
+            "mesh_site": "https://mesh15534.example.com",
+            "mesh_username": "jane",
+            "sync_mesh_with_trmm": False,
+        }
+        r = self.client.put(url, data)
+        self.assertEqual(r.status_code, 200)
+        core = get_core_settings()
+        self.assertEqual(core.smtp_from_email, "newexample1@example.com")
+        self.assertIn("41410834b8bb4481446027f8", core.mesh_token)  # type: ignore
+        self.assertTrue(core.sync_mesh_with_trmm)
+        if "GHACTIONS" in os.environ:
+            self.assertEqual(core.mesh_site, "https://example.com")
+            self.assertEqual(core.mesh_username, "pipeline")
+
+        # test to_representation
+        r = self.client.get(url)
+        self.assertEqual(r.data["smtp_from_email"], "newexample1@example.com")
+        self.assertEqual(r.data["mesh_token"], "n/a")
+        self.assertEqual(r.data["mesh_site"], "n/a")
+        self.assertEqual(r.data["mesh_username"], "n/a")
+        self.assertTrue(r.data["sync_mesh_with_trmm"])
 
         self.check_not_authenticated("put", url)
 
@@ -445,6 +490,80 @@ class TestCoreMgmtCommands(TacticalTestCase):
             call_command("get_config", cmd)
 
 
+class TestNatsUrls(TacticalTestCase):
+    def setUp(self):
+        self.setup_coresettings()
+
+    def test_standard_install(self):
+        self.assertEqual(get_nats_url(), "nats://127.0.0.1:4222")
+
+    @override_settings(
+        NATS_STANDARD_PORT=5000,
+        USE_NATS_STANDARD=True,
+        ALLOWED_HOSTS=["api.example.com"],
+    )
+    def test_custom_port_nats_standard(self):
+        self.assertEqual(get_nats_url(), "tls://api.example.com:5000")
+
+    @override_settings(DOCKER_BUILD=True, ALLOWED_HOSTS=["api.example.com"])
+    def test_docker_nats(self):
+        self.assertEqual(get_nats_url(), "nats://api.example.com:4222")
+
+    @patch.dict("os.environ", {"NATS_CONNECT_HOST": "172.20.4.3"})
+    @override_settings(ALLOWED_HOSTS=["api.example.com"])
+    def test_custom_connect_host_env(self):
+        self.assertEqual(get_nats_url(), "nats://172.20.4.3:4222")
+
+    def test_standard_nats_hosts(self):
+        self.assertEqual(get_nats_hosts(), ("127.0.0.1", "127.0.0.1", "127.0.0.1"))
+
+    @override_settings(DOCKER_BUILD=True, ALLOWED_HOSTS=["api.example.com"])
+    def test_docker_nats_hosts(self):
+        self.assertEqual(get_nats_hosts(), ("0.0.0.0", "0.0.0.0", "api.example.com"))
+
+
+class TestMeshWSUrl(TacticalTestCase):
+    def setUp(self):
+        self.setup_coresettings()
+
+    @patch("core.utils.get_auth_token")
+    def test_standard_install(self, mock_token):
+        mock_token.return_value = "abc123"
+        self.assertEqual(
+            get_mesh_ws_url(), "ws://127.0.0.1:4430/control.ashx?auth=abc123"
+        )
+
+    @patch("core.utils.get_auth_token")
+    @override_settings(MESH_PORT=8876)
+    def test_standard_install_custom_port(self, mock_token):
+        mock_token.return_value = "abc123"
+        self.assertEqual(
+            get_mesh_ws_url(), "ws://127.0.0.1:8876/control.ashx?auth=abc123"
+        )
+
+    @patch("core.utils.get_auth_token")
+    @override_settings(DOCKER_BUILD=True, MESH_WS_URL="ws://tactical-meshcentral:4443")
+    def test_docker_install(self, mock_token):
+        mock_token.return_value = "abc123"
+        self.assertEqual(
+            get_mesh_ws_url(), "ws://tactical-meshcentral:4443/control.ashx?auth=abc123"
+        )
+
+    @patch("core.utils.get_auth_token")
+    @override_settings(USE_EXTERNAL_MESH=True)
+    def test_external_mesh(self, mock_token):
+        mock_token.return_value = "abc123"
+
+        from core.models import CoreSettings
+
+        core = CoreSettings.objects.first()
+        core.mesh_site = "https://mesh.external.com"  # type: ignore
+        core.save(update_fields=["mesh_site"])  # type: ignore
+        self.assertEqual(
+            get_mesh_ws_url(), "wss://mesh.external.com/control.ashx?auth=abc123"
+        )
+
+
 class TestCorePermissions(TacticalTestCase):
     def setUp(self):
         self.setup_client()
@@ -464,7 +583,7 @@ class TestCoreUtils(TacticalTestCase):
         )
         self.assertEqual(
             r,
-            "https://mesh.example.com/meshagents?id=abc123&installflags=2&meshinstall=10005",
+            "http://127.0.0.1:4430/meshagents?id=abc123&installflags=2&meshinstall=10005",
         )
 
         r = get_meshagent_url(
@@ -475,7 +594,7 @@ class TestCoreUtils(TacticalTestCase):
         )
         self.assertEqual(
             r,
-            "https://mesh.example.com/meshagents?id=4&meshid=abc123&installflags=0",
+            "http://127.0.0.1:4430/meshagents?id=4&meshid=abc123&installflags=0",
         )
 
     @override_settings(DOCKER_BUILD=True)
@@ -503,8 +622,8 @@ class TestCoreUtils(TacticalTestCase):
             "http://tactical-meshcentral:4443/meshagents?id=4&meshid=abc123&installflags=0",
         )
 
-    @override_settings(TRMM_INSECURE=True)
-    def test_get_meshagent_url_insecure(self):
+    @override_settings(USE_EXTERNAL_MESH=True)
+    def test_get_meshagent_url_external_mesh(self):
         r = get_meshagent_url(
             ident=MeshAgentIdent.DARWIN_UNIVERSAL,
             plat="darwin",
@@ -513,7 +632,7 @@ class TestCoreUtils(TacticalTestCase):
         )
         self.assertEqual(
             r,
-            "http://mesh.example.com:4430/meshagents?id=abc123&installflags=2&meshinstall=10005",
+            "https://mesh.example.com/meshagents?id=abc123&installflags=2&meshinstall=10005",
         )
 
         r = get_meshagent_url(
@@ -524,5 +643,29 @@ class TestCoreUtils(TacticalTestCase):
         )
         self.assertEqual(
             r,
-            "http://mesh.example.com:4430/meshagents?id=4&meshid=abc123&installflags=0",
+            "https://mesh.example.com/meshagents?id=4&meshid=abc123&installflags=0",
+        )
+
+    @override_settings(MESH_PORT=8653)
+    def test_get_meshagent_url_mesh_port(self):
+        r = get_meshagent_url(
+            ident=MeshAgentIdent.DARWIN_UNIVERSAL,
+            plat="darwin",
+            mesh_site="https://mesh.example.com",
+            mesh_device_id="abc123",
+        )
+        self.assertEqual(
+            r,
+            "http://127.0.0.1:8653/meshagents?id=abc123&installflags=2&meshinstall=10005",
+        )
+
+        r = get_meshagent_url(
+            ident=MeshAgentIdent.WIN64,
+            plat="windows",
+            mesh_site="https://mesh.example.com",
+            mesh_device_id="abc123",
+        )
+        self.assertEqual(
+            r,
+            "http://127.0.0.1:8653/meshagents?id=4&meshid=abc123&installflags=0",
         )

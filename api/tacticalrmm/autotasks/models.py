@@ -1,9 +1,9 @@
 import asyncio
+import logging
 import random
 import string
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
-from zoneinfo import ZoneInfo
 
 from django.core.cache import cache
 from django.core.validators import MaxValueValidator, MinValueValidator
@@ -14,12 +14,11 @@ from django.db.utils import DatabaseError
 from django.utils import timezone as djangotime
 
 from core.utils import get_core_settings
-from logs.models import BaseAuditModel, DebugLog
+from logs.models import BaseAuditModel
 from tacticalrmm.constants import (
     FIELDS_TRIGGER_TASK_UPDATE_AGENT,
     POLICY_TASK_FIELDS_TO_COPY,
     AlertSeverity,
-    DebugLogType,
     TaskStatus,
     TaskSyncStatus,
     TaskType,
@@ -31,6 +30,7 @@ if TYPE_CHECKING:
     from agents.models import Agent
     from checks.models import Check
 
+from tacticalrmm.helpers import has_script_actions, has_webhook
 from tacticalrmm.models import PermissionQuerySet
 from tacticalrmm.utils import (
     bitdays_to_string,
@@ -44,6 +44,9 @@ from tacticalrmm.utils import (
 def generate_task_name() -> str:
     chars = string.ascii_letters
     return "TacticalRMM_" + "".join(random.choice(chars) for i in range(35))
+
+
+logger = logging.getLogger("trmm")
 
 
 class AutomatedTask(BaseAuditModel):
@@ -149,7 +152,7 @@ class AutomatedTask(BaseAuditModel):
 
         # get old task if exists
         old_task = AutomatedTask.objects.get(pk=self.pk) if self.pk else None
-        super(AutomatedTask, self).save(old_model=old_task, *args, **kwargs)
+        super().save(old_model=old_task, *args, **kwargs)
 
         # check if fields were updated that require a sync to the agent and set status to notsynced
         if old_task:
@@ -172,10 +175,7 @@ class AutomatedTask(BaseAuditModel):
             cache.delete_many_pattern("site_*_tasks")
             cache.delete_many_pattern("agent_*_tasks")
 
-        super(AutomatedTask, self).delete(
-            *args,
-            **kwargs,
-        )
+        super().delete(*args, **kwargs)
 
     @property
     def schedule(self) -> Optional[str]:
@@ -209,6 +209,9 @@ class AutomatedTask(BaseAuditModel):
             weeks = bitweeks_to_string(self.monthly_weeks_of_month)
             days = bitdays_to_string(self.run_time_bit_weekdays)
             return f"Runs on {months} on {weeks} on {days} at {run_time_nice}"
+        elif self.task_type == TaskType.ONBOARDING:
+            return "Onboarding: Runs once on task creation."
+        return None
 
     @property
     def fields_that_trigger_task_update_on_agent(self) -> List[str]:
@@ -236,64 +239,56 @@ class AutomatedTask(BaseAuditModel):
         task.save()
 
     # agent version >= 1.8.0
-    def generate_nats_task_payload(
-        self, agent: "Optional[Agent]" = None, editing: bool = False
-    ) -> Dict[str, Any]:
+    def generate_nats_task_payload(self) -> Dict[str, Any]:
         task = {
             "pk": self.pk,
             "type": "rmm",
             "name": self.win_task_name,
-            "overwrite_task": editing,
+            "overwrite_task": True,
             "enabled": self.enabled,
-            "trigger": self.task_type
-            if self.task_type != TaskType.CHECK_FAILURE
-            else TaskType.MANUAL,
+            "trigger": (
+                self.task_type
+                if self.task_type != TaskType.CHECK_FAILURE
+                else TaskType.MANUAL
+            ),
             "multiple_instances": self.task_instance_policy or 0,
-            "delete_expired_task_after": self.remove_if_not_scheduled
-            if self.expire_date
-            else False,
-            "start_when_available": self.run_asap_after_missed
-            if self.task_type != TaskType.RUN_ONCE
-            else True,
+            "delete_expired_task_after": (
+                self.remove_if_not_scheduled if self.expire_date else False
+            ),
+            "start_when_available": (
+                self.run_asap_after_missed
+                if self.task_type != TaskType.RUN_ONCE
+                else True
+            ),
         }
 
         if self.task_type in (
-            TaskType.RUN_ONCE,
             TaskType.DAILY,
             TaskType.WEEKLY,
             TaskType.MONTHLY,
             TaskType.MONTHLY_DOW,
+            TaskType.RUN_ONCE,
         ):
-            # set runonce task in future if creating and run_asap_after_missed is set
-            if (
-                not editing
-                and self.task_type == TaskType.RUN_ONCE
-                and self.run_asap_after_missed
-                and agent
-                and self.run_time_date.replace(tzinfo=ZoneInfo(agent.timezone))
-                < djangotime.now().astimezone(ZoneInfo(agent.timezone))
-            ):
-                self.run_time_date = (
-                    djangotime.now() + djangotime.timedelta(minutes=5)
-                ).astimezone(ZoneInfo(agent.timezone))
+            if not self.run_time_date:
+                self.run_time_date = djangotime.now()
 
-            task["start_year"] = int(self.run_time_date.strftime("%Y"))
-            task["start_month"] = int(self.run_time_date.strftime("%-m"))
-            task["start_day"] = int(self.run_time_date.strftime("%-d"))
-            task["start_hour"] = int(self.run_time_date.strftime("%-H"))
-            task["start_min"] = int(self.run_time_date.strftime("%-M"))
+            task["start_year"] = self.run_time_date.year
+            task["start_month"] = self.run_time_date.month
+            task["start_day"] = self.run_time_date.day
+            task["start_hour"] = self.run_time_date.hour
+            task["start_min"] = self.run_time_date.minute
 
             if self.expire_date:
-                task["expire_year"] = int(self.expire_date.strftime("%Y"))
-                task["expire_month"] = int(self.expire_date.strftime("%-m"))
-                task["expire_day"] = int(self.expire_date.strftime("%-d"))
-                task["expire_hour"] = int(self.expire_date.strftime("%-H"))
-                task["expire_min"] = int(self.expire_date.strftime("%-M"))
+                task["expire_year"] = self.expire_date.year
+                task["expire_month"] = self.expire_date.month
+                task["expire_day"] = self.expire_date.day
+                task["expire_hour"] = self.expire_date.hour
+                task["expire_min"] = self.expire_date.minute
 
             if self.random_task_delay:
                 task["random_delay"] = convert_to_iso_duration(self.random_task_delay)
 
-            if self.task_repetition_interval:
+            if self.task_repetition_interval and self.task_repetition_duration:
                 task["repetition_interval"] = convert_to_iso_duration(
                     self.task_repetition_interval
                 )
@@ -341,27 +336,24 @@ class AutomatedTask(BaseAuditModel):
 
         nats_data = {
             "func": "schedtask",
-            "schedtaskpayload": self.generate_nats_task_payload(agent),
+            "schedtaskpayload": self.generate_nats_task_payload(),
         }
+        logger.debug(nats_data)
 
-        r = asyncio.run(task_result.agent.nats_cmd(nats_data, timeout=5))
+        r = asyncio.run(task_result.agent.nats_cmd(nats_data, timeout=10))
 
         if r != "ok":
             task_result.sync_status = TaskSyncStatus.INITIAL
             task_result.save(update_fields=["sync_status"])
-            DebugLog.warning(
-                agent=agent,
-                log_type=DebugLogType.AGENT_ISSUES,
-                message=f"Unable to create scheduled task {self.name} on {task_result.agent.hostname}. It will be created when the agent checks in.",
+            logger.error(
+                f"Unable to create scheduled task {self.name} on {task_result.agent.hostname}: {r}"
             )
             return "timeout"
         else:
             task_result.sync_status = TaskSyncStatus.SYNCED
             task_result.save(update_fields=["sync_status"])
-            DebugLog.info(
-                agent=agent,
-                log_type=DebugLogType.AGENT_ISSUES,
-                message=f"{task_result.agent.hostname} task {self.name} was successfully created",
+            logger.info(
+                f"{task_result.agent.hostname} task {self.name} was successfully created."
             )
 
         return "ok"
@@ -380,27 +372,24 @@ class AutomatedTask(BaseAuditModel):
 
         nats_data = {
             "func": "schedtask",
-            "schedtaskpayload": self.generate_nats_task_payload(editing=True),
+            "schedtaskpayload": self.generate_nats_task_payload(),
         }
+        logger.debug(nats_data)
 
-        r = asyncio.run(task_result.agent.nats_cmd(nats_data, timeout=5))
+        r = asyncio.run(task_result.agent.nats_cmd(nats_data, timeout=10))
 
         if r != "ok":
             task_result.sync_status = TaskSyncStatus.NOT_SYNCED
             task_result.save(update_fields=["sync_status"])
-            DebugLog.warning(
-                agent=agent,
-                log_type=DebugLogType.AGENT_ISSUES,
-                message=f"Unable to modify scheduled task {self.name} on {task_result.agent.hostname}({task_result.agent.agent_id}). It will try again on next agent checkin",
+            logger.error(
+                f"Unable to modify scheduled task {self.name} on {task_result.agent.hostname}: {r}"
             )
             return "timeout"
         else:
             task_result.sync_status = TaskSyncStatus.SYNCED
             task_result.save(update_fields=["sync_status"])
-            DebugLog.info(
-                agent=agent,
-                log_type=DebugLogType.AGENT_ISSUES,
-                message=f"{task_result.agent.hostname} task {self.name} was successfully modified",
+            logger.info(
+                f"{task_result.agent.hostname} task {self.name} was successfully modified."
             )
 
         return "ok"
@@ -429,20 +418,13 @@ class AutomatedTask(BaseAuditModel):
             with suppress(DatabaseError):
                 task_result.save(update_fields=["sync_status"])
 
-            DebugLog.warning(
-                agent=agent,
-                log_type=DebugLogType.AGENT_ISSUES,
-                message=f"{task_result.agent.hostname} task {self.name} will be deleted on next checkin",
+            logger.error(
+                f"Unable to delete task {self.name} on {task_result.agent.hostname}: {r}"
             )
             return "timeout"
         else:
             self.delete()
-            DebugLog.info(
-                agent=agent,
-                log_type=DebugLogType.AGENT_ISSUES,
-                message=f"{task_result.agent.hostname}({task_result.agent.agent_id}) task {self.name} was deleted",
-            )
-
+            logger.info(f"{task_result.agent.hostname} task {self.name} was deleted.")
         return "ok"
 
     def run_win_task(self, agent: "Optional[Agent]" = None) -> str:
@@ -465,18 +447,19 @@ class AutomatedTask(BaseAuditModel):
         return "ok"
 
     def should_create_alert(self, alert_template=None):
+        has_autotask_notification = (
+            self.dashboard_alert or self.email_alert or self.text_alert
+        )
+        has_alert_template_notification = alert_template and (
+            alert_template.task_always_alert
+            or alert_template.task_always_email
+            or alert_template.task_always_text
+        )
         return (
-            self.dashboard_alert
-            or self.email_alert
-            or self.text_alert
-            or (
-                alert_template
-                and (
-                    alert_template.task_always_alert
-                    or alert_template.task_always_email
-                    or alert_template.task_always_text
-                )
-            )
+            has_autotask_notification
+            or has_alert_template_notification
+            or has_webhook(alert_template, "task")
+            or has_script_actions(alert_template, "task")
         )
 
 
@@ -486,6 +469,7 @@ class TaskResult(models.Model):
 
     objects = PermissionQuerySet.as_manager()
 
+    id = models.BigAutoField(primary_key=True)
     agent = models.ForeignKey(
         "agents.Agent",
         related_name="taskresults",

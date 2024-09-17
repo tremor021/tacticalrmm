@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import re
 from collections import Counter
 from contextlib import suppress
@@ -7,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union, ca
 import msgpack
 import nats
 import validators
-from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.contrib.postgres.fields import ArrayField
 from django.core.cache import cache
@@ -20,7 +20,7 @@ from packaging.version import Version as LooseVersion
 from agents.utils import get_agent_url
 from checks.models import CheckResult
 from core.models import TZ_CHOICES
-from core.utils import get_core_settings, send_command_with_mesh
+from core.utils import _b64_to_hex, get_core_settings, send_command_with_mesh
 from logs.models import BaseAuditModel, DebugLog, PendingAction
 from tacticalrmm.constants import (
     AGENT_STATUS_OFFLINE,
@@ -40,7 +40,7 @@ from tacticalrmm.constants import (
     PAAction,
     PAStatus,
 )
-from tacticalrmm.helpers import setup_nats_options
+from tacticalrmm.helpers import has_script_actions, has_webhook, setup_nats_options
 from tacticalrmm.models import PermissionQuerySet
 
 if TYPE_CHECKING:
@@ -53,6 +53,8 @@ if TYPE_CHECKING:
 
 # type helpers
 Disk = Union[Dict[str, Any], str]
+
+logger = logging.getLogger("trmm")
 
 
 class Agent(BaseAuditModel):
@@ -123,6 +125,27 @@ class Agent(BaseAuditModel):
 
     def __str__(self) -> str:
         return self.hostname
+
+    def save(self, *args, **kwargs):
+        # prevent recursion since calling set_alert_template() also calls save()
+        if not hasattr(self, "_processing_set_alert_template"):
+            self._processing_set_alert_template = False
+
+        if self.pk and not self._processing_set_alert_template:
+            orig = Agent.objects.get(pk=self.pk)
+            mon_type_changed = self.monitoring_type != orig.monitoring_type
+            site_changed = self.site_id != orig.site_id
+            policy_changed = self.policy != orig.policy
+            block_inherit = (
+                self.block_policy_inheritance != orig.block_policy_inheritance
+            )
+
+            if mon_type_changed or site_changed or policy_changed or block_inherit:
+                self._processing_set_alert_template = True
+                self.set_alert_template()
+                self._processing_set_alert_template = False
+
+        super().save(*args, **kwargs)
 
     @property
     def client(self) -> "Client":
@@ -280,7 +303,20 @@ class Agent(BaseAuditModel):
         try:
             cpus = self.wmi_detail["cpu"]
             for cpu in cpus:
-                ret.append([x["Name"] for x in cpu if "Name" in x][0])
+                name = [x["Name"] for x in cpu if "Name" in x][0]
+                lp, nc = "", ""
+                with suppress(Exception):
+                    lp = [
+                        x["NumberOfLogicalProcessors"]
+                        for x in cpu
+                        if "NumberOfCores" in x
+                    ][0]
+                    nc = [x["NumberOfCores"] for x in cpu if "NumberOfCores" in x][0]
+                if lp and nc:
+                    cpu_string = f"{name}, {nc}C/{lp}T"
+                else:
+                    cpu_string = name
+                ret.append(cpu_string)
             return ret
         except:
             return ["unknown cpu model"]
@@ -411,12 +447,19 @@ class Agent(BaseAuditModel):
     @property
     def serial_number(self) -> str:
         if self.is_posix:
-            return ""
+            try:
+                return self.wmi_detail["serialnumber"]
+            except:
+                return ""
 
         try:
             return self.wmi_detail["bios"][0][0]["SerialNumber"]
         except:
             return ""
+
+    @property
+    def hex_mesh_node_id(self) -> str:
+        return _b64_to_hex(self.mesh_node_id)
 
     @classmethod
     def online_agents(cls, min_version: str = "") -> "List[Agent]":
@@ -505,24 +548,32 @@ class Agent(BaseAuditModel):
         )
 
         return {
-            "agent_policy": self.policy
-            if self.policy and not self.policy.is_agent_excluded(self)
-            else None,
-            "site_policy": site_policy
-            if (site_policy and not site_policy.is_agent_excluded(self))
-            and not self.block_policy_inheritance
-            else None,
-            "client_policy": client_policy
-            if (client_policy and not client_policy.is_agent_excluded(self))
-            and not self.block_policy_inheritance
-            and not self.site.block_policy_inheritance
-            else None,
-            "default_policy": default_policy
-            if (default_policy and not default_policy.is_agent_excluded(self))
-            and not self.block_policy_inheritance
-            and not self.site.block_policy_inheritance
-            and not self.client.block_policy_inheritance
-            else None,
+            "agent_policy": (
+                self.policy
+                if self.policy and not self.policy.is_agent_excluded(self)
+                else None
+            ),
+            "site_policy": (
+                site_policy
+                if (site_policy and not site_policy.is_agent_excluded(self))
+                and not self.block_policy_inheritance
+                else None
+            ),
+            "client_policy": (
+                client_policy
+                if (client_policy and not client_policy.is_agent_excluded(self))
+                and not self.block_policy_inheritance
+                and not self.site.block_policy_inheritance
+                else None
+            ),
+            "default_policy": (
+                default_policy
+                if (default_policy and not default_policy.is_agent_excluded(self))
+                and not self.block_policy_inheritance
+                and not self.site.block_policy_inheritance
+                and not self.client.block_policy_inheritance
+                else None
+            ),
         }
 
     def check_run_interval(self) -> int:
@@ -568,6 +619,8 @@ class Agent(BaseAuditModel):
             },
             "run_as_user": run_as_user,
             "env_vars": parsed_env_vars,
+            "nushell_enable_config": settings.NUSHELL_ENABLE_CONFIG,
+            "deno_default_permissions": settings.DENO_DEFAULT_PERMISSIONS,
         }
 
         if history_pk != 0:
@@ -798,9 +851,6 @@ class Agent(BaseAuditModel):
             cache.set(cache_key, tasks, 600)
             return tasks
 
-    def _do_nats_debug(self, agent: "Agent", message: str) -> None:
-        DebugLog.error(agent=agent, log_type=DebugLogType.AGENT_ISSUES, message=message)
-
     async def nats_cmd(
         self, data: Dict[Any, Any], timeout: int = 30, wait: bool = True
     ) -> Any:
@@ -822,9 +872,7 @@ class Agent(BaseAuditModel):
                     ret = msgpack.loads(msg.data)
                 except Exception as e:
                     ret = str(e)
-                    await sync_to_async(self._do_nats_debug, thread_sensitive=False)(
-                        agent=self, message=ret
-                    )
+                    logger.error(e)
 
             await nc.close()
             return ret
@@ -907,18 +955,22 @@ class Agent(BaseAuditModel):
     def should_create_alert(
         self, alert_template: "Optional[AlertTemplate]" = None
     ) -> bool:
-        return bool(
+        has_agent_notification = (
             self.overdue_dashboard_alert
             or self.overdue_email_alert
             or self.overdue_text_alert
-            or (
-                alert_template
-                and (
-                    alert_template.agent_always_alert
-                    or alert_template.agent_always_email
-                    or alert_template.agent_always_text
-                )
-            )
+        )
+        has_alert_template_notification = alert_template and (
+            alert_template.agent_always_alert
+            or alert_template.agent_always_email
+            or alert_template.agent_always_text
+        )
+
+        return bool(
+            has_agent_notification
+            or has_alert_template_notification
+            or has_webhook(alert_template, "agent")
+            or has_script_actions(alert_template, "agent")
         )
 
     def send_outage_email(self) -> None:
@@ -1047,6 +1099,7 @@ class AgentCustomField(models.Model):
 class AgentHistory(models.Model):
     objects = PermissionQuerySet.as_manager()
 
+    id = models.BigAutoField(primary_key=True)
     agent = models.ForeignKey(
         Agent,
         related_name="history",

@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, Tuple, Union, cast
 
 from django.db import models
 
@@ -26,6 +26,7 @@ def get_debug_level() -> str:
 
 
 class AuditLog(models.Model):
+    id = models.BigAutoField(primary_key=True)
     username = models.CharField(max_length=255)
     agent = models.CharField(max_length=255, null=True, blank=True)
     agent_id = models.CharField(max_length=255, blank=True, null=True)
@@ -47,7 +48,7 @@ class AuditLog(models.Model):
                 (self.message[:253] + "..") if len(self.message) > 255 else self.message
             )
 
-        return super(AuditLog, self).save(*args, **kwargs)
+        return super().save(*args, **kwargs)
 
     @staticmethod
     def audit_mesh_session(
@@ -143,15 +144,38 @@ class AuditLog(models.Model):
 
     @staticmethod
     def audit_script_run(
-        username: str, agent: "Agent", script: str, debug_info: Dict[Any, Any] = {}
+        username: str,
+        script: str,
+        agent: Optional["Agent"],
+        debug_info: Dict[Any, Any] = {},
     ) -> None:
         AuditLog.objects.create(
-            agent=agent.hostname,
-            agent_id=agent.agent_id,
+            agent=agent.hostname if agent else "Tactical RMM Server",
+            agent_id=agent.agent_id if agent else "N/A",
             username=username,
             object_type=AuditObjType.AGENT,
             action=AuditActionType.EXEC_SCRIPT,
-            message=f'{username} ran script: "{script}" on {agent.hostname}',
+            message=f'{username} ran script: "{script}" on {agent.hostname if agent else "Tactical RMM Server"}',
+            debug_info=debug_info,
+        )
+
+    @staticmethod
+    def audit_test_script_run(
+        username: str,
+        script_body: str,
+        agent: Optional["Agent"],
+        debug_info: Dict[Any, Any] = {},
+    ) -> None:
+
+        debug_info["script_body"] = script_body
+
+        AuditLog.objects.create(
+            agent=agent.hostname if agent else "Tactical RMM Server",
+            agent_id=agent.agent_id if agent else "N/A",
+            username=username,
+            object_type=AuditObjType.AGENT,
+            action=AuditActionType.EXEC_SCRIPT,
+            message=f'{username} tested a script on {agent.hostname if agent else "Tactical RMM Server"}',
             debug_info=debug_info,
         )
 
@@ -211,6 +235,48 @@ class AuditLog(models.Model):
         )
 
     @staticmethod
+    def audit_url_action_test(
+        username: str,
+        url: str,
+        body: str,
+        headers: Dict[Any, Any],
+        instance_type: Literal["agent", "client", "site"],
+        instance_id: int,
+        debug_info: Dict[Any, Any] = {},
+    ) -> None:
+        from agents.models import Agent
+        from clients.models import Client, Site
+
+        debug_info["body"] = body
+        debug_info["headers"] = headers
+
+        if instance_type == "agent":
+            instance = Agent.objects.get(agent_id=instance_id)
+
+        elif instance_type == "site":
+            instance = Site.objects.get(pk=instance_id)
+
+        elif instance_type == "client":
+            instance = Client.objects.get(pk=instance_id)
+        else:
+            instance = None
+
+        if instance is not None:
+            name = instance.hostname if isinstance(instance, Agent) else instance.name
+        else:
+            name = "None"
+        classname = type(instance).__name__
+        AuditLog.objects.create(
+            username=username,
+            agent=name if isinstance(instance, Agent) else None,
+            agent_id=instance.agent_id if isinstance(instance, Agent) else None,
+            object_type=classname.lower(),
+            action=AuditActionType.URL_ACTION,
+            message=f"{username} tested url action: {url} on {classname}: {name}",
+            debug_info=debug_info,
+        )
+
+    @staticmethod
     def audit_bulk_action(
         username: str,
         action: str,
@@ -231,7 +297,7 @@ class AuditLog(models.Model):
             target = f"on all agents within client: {client.name}"
         elif affected["target"] == "site":
             site = Site.objects.get(pk=affected["site"])
-            target = f"on all agents within site: {site.client.name}\\{site.name}"
+            target = f"on all agents within site: {site.client.name} - {site.name}"
         elif affected["target"] == "agents":
             agents = Agent.objects.filter(agent_id__in=affected["agents"]).values_list(
                 "hostname", flat=True
@@ -258,6 +324,7 @@ class AuditLog(models.Model):
 class DebugLog(models.Model):
     objects = PermissionQuerySet.as_manager()
 
+    id = models.BigAutoField(primary_key=True)
     entry_time = models.DateTimeField(auto_now_add=True)
     agent = models.ForeignKey(
         "agents.Agent",
@@ -347,6 +414,7 @@ class DebugLog(models.Model):
 class PendingAction(models.Model):
     objects = PermissionQuerySet.as_manager()
 
+    id = models.BigAutoField(primary_key=True)
     agent = models.ForeignKey(
         "agents.Agent",
         related_name="pendingactions",
@@ -454,10 +522,10 @@ class BaseAuditModel(models.Model):
                         debug_info=get_debug_info(),
                     )
 
-        super(BaseAuditModel, self).save(*args, **kwargs)
+        super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs) -> Tuple[int, Dict[str, int]]:
-        super(BaseAuditModel, self).delete(*args, **kwargs)
+        super().delete(*args, **kwargs)
 
         username = get_username()
         if username:

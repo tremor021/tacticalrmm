@@ -3,6 +3,7 @@ import os
 import subprocess
 import tempfile
 import time
+import re
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, List, Literal, Optional, Union
 from zoneinfo import ZoneInfo
@@ -33,6 +34,7 @@ from tacticalrmm.constants import (
 )
 from tacticalrmm.helpers import (
     get_certs,
+    get_nats_hosts,
     get_nats_internal_protocol,
     get_nats_ports,
     notify_error,
@@ -40,6 +42,7 @@ from tacticalrmm.helpers import (
 
 if TYPE_CHECKING:
     from clients.models import Client, Site
+    from alerts.models import Alert
 
 
 def generate_winagent_exe(
@@ -206,13 +209,16 @@ def reload_nats() -> None:
             )
 
     cert_file, key_file = get_certs()
+    nats_std_host, nats_ws_host, _ = get_nats_hosts()
     nats_std_port, nats_ws_port = get_nats_ports()
 
     config = {
         "authorization": {"users": users},
         "max_payload": 67108864,
+        "host": nats_std_host,
         "port": nats_std_port,  # internal only
         "websocket": {
+            "host": nats_ws_host,
             "port": nats_ws_port,
             "no_tls": True,  # TLS is handled by nginx, so not needed here
         },
@@ -287,6 +293,14 @@ def get_latest_trmm_ver() -> str:
     return "error"
 
 
+# regex for db data replacement
+# will return 3 groups of matches in a tuple when uses with re.findall
+# i.e. - {{client.name}}, client, name
+RE_DB_VALUE = re.compile(
+    r"(\{\{\s*(client|site|agent|global|alert)(?:\.([\w\-\s\.]+))+\s*\}\})"
+)
+
+
 # Receives something like {{ client.name }} and a Model instance of Client, Site, or Agent. If an
 # agent instance is passed it will resolve the value of agent.client.name and return the agent's client name.
 #
@@ -296,7 +310,7 @@ def get_latest_trmm_ver() -> str:
 #
 # You can also use {{ global.value }} without an obj instance to use the global key store
 def get_db_value(
-    *, string: str, instance: Optional[Union["Agent", "Client", "Site"]] = None
+    *, string: str, instance: Optional[Union["Agent", "Client", "Site", "Alert"]] = None
 ) -> Union[str, List[str], Literal[True], Literal[False], None]:
     from core.models import CustomField, GlobalKVStore
 
@@ -398,6 +412,17 @@ def replace_arg_db_values(
     # format args for bool
     elif value is True or value is False:
         return format_shell_bool(value, shell)
+
+    elif isinstance(value, dict):
+        return json.dumps(value)
+
+    # return str for everything else
+    try:
+        ret = str(value)
+    except Exception:
+        ret = ""
+
+    return ret
 
 
 def format_shell_array(value: list[str]) -> str:

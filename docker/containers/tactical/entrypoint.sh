@@ -18,6 +18,8 @@ set -e
 : "${APP_HOST:=tactical-frontend}"
 : "${REDIS_HOST:=tactical-redis}"
 : "${SKIP_UWSGI_CONFIG:=0}"
+: "${TRMM_DISABLE_WEB_TERMINAL:=False}"
+: "${TRMM_DISABLE_SERVER_SCRIPTS:=False}"
 
 : "${CERT_PRIV_PATH:=${TACTICAL_DIR}/certs/privkey.pem}"
 : "${CERT_PUB_PATH:=${TACTICAL_DIR}/certs/fullchain.pem}"
@@ -111,6 +113,8 @@ MESH_TOKEN_KEY = '${MESH_TOKEN}'
 REDIS_HOST    = '${REDIS_HOST}'
 MESH_WS_URL = '${MESH_WS_URL}'
 ADMIN_ENABLED = False
+TRMM_DISABLE_WEB_TERMINAL = ${TRMM_DISABLE_WEB_TERMINAL}
+TRMM_DISABLE_SERVER_SCRIPTS = ${TRMM_DISABLE_SERVER_SCRIPTS}
 EOF
   )"
 
@@ -159,7 +163,7 @@ fi
 
 if [ "$1" = 'tactical-celery' ]; then
   check_tactical_ready
-  celery -A tacticalrmm worker --autoscale=30,5 -l info
+  celery -A tacticalrmm worker --autoscale=20,2 -l info
 fi
 
 if [ "$1" = 'tactical-celerybeat' ]; then

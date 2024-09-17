@@ -69,6 +69,7 @@ ALLOWED_HOSTS = ['${API_HOST}', '*']
 ADMIN_URL = 'admin/'
 
 CORS_ORIGIN_ALLOW_ALL = True
+CORS_ORIGIN_WHITELIST = ['https://${API_HOST}']
 
 DATABASES = {
     'default': {
@@ -98,6 +99,7 @@ MESH_TOKEN_KEY = '${MESH_TOKEN}'
 REDIS_HOST    = '${REDIS_HOST}'
 MESH_WS_URL = '${MESH_WS_URL}'
 ADMIN_ENABLED = True
+TRMM_INSECURE = True
 EOF
 )"
 

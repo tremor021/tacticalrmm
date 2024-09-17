@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-SCRIPT_VERSION="149"
+SCRIPT_VERSION="153"
 SCRIPT_URL='https://raw.githubusercontent.com/amidaware/tacticalrmm/master/update.sh'
 LATEST_SETTINGS_URL='https://raw.githubusercontent.com/amidaware/tacticalrmm/master/api/tacticalrmm/tacticalrmm/settings.py'
 YELLOW='\033[1;33m'
@@ -10,8 +10,9 @@ NC='\033[0m'
 THIS_SCRIPT=$(readlink -f "$0")
 
 SCRIPTS_DIR='/opt/trmm-community-scripts'
-PYTHON_VER='3.11.6'
+PYTHON_VER='3.11.8'
 SETTINGS_FILE='/rmm/api/tacticalrmm/tacticalrmm/settings.py'
+local_settings='/rmm/api/tacticalrmm/tacticalrmm/local_settings.py'
 
 TMP_FILE=$(mktemp -p "" "rmmupdate_XXXXXXXXXX")
 curl -s -L "${SCRIPT_URL}" >${TMP_FILE}
@@ -24,6 +25,8 @@ if [ "${SCRIPT_VERSION}" -ne "${NEW_VER}" ]; then
 fi
 
 rm -f $TMP_FILE
+
+export DEBIAN_FRONTEND=noninteractive
 
 force=false
 if [[ $* == *--force* ]]; then
@@ -112,6 +115,34 @@ for i in nginx nats-api nats rmm daphne; do
   sudo systemctl stop ${i}
 done
 
+if ! grep -q V3 /etc/systemd/system/celerybeat.service; then
+  sudo rm -f /etc/systemd/system/celerybeat.service
+
+  celerybeatservice="$(
+    cat <<EOF
+[Unit]
+Description=Celery Beat Service V3
+After=network.target redis-server.service postgresql.service
+
+[Service]
+Type=simple
+User=${USER}
+Group=${USER}
+EnvironmentFile=/etc/conf.d/celery.conf
+WorkingDirectory=/rmm/api/tacticalrmm
+ExecStart=/bin/sh -c '\${CELERY_BIN} -A \${CELERY_APP} beat --pidfile=\${CELERYBEAT_PID_FILE} --logfile=\${CELERYBEAT_LOG_FILE} --loglevel=\${CELERYD_LOG_LEVEL}'
+ExecStartPre=rm -f /rmm/api/tacticalrmm/beat.pid
+Restart=always
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  )"
+  echo "${celerybeatservice}" | sudo tee /etc/systemd/system/celerybeat.service >/dev/null
+  sudo systemctl daemon-reload
+fi
+
 # migrate daphne to uvicorn
 if ! grep -q uvicorn /etc/systemd/system/daphne.service; then
   sudo rm -f /etc/systemd/system/daphne.service
@@ -166,9 +197,18 @@ deb [signed-by=/etc/apt/keyrings/nginx-archive-keyring.gpg] http://nginx.org/pac
 EOF
   )"
   echo "${nginxrepo}" | sudo tee /etc/apt/sources.list.d/nginx.list >/dev/null
-  wget -qO - https://nginx.org/packages/keys/nginx_signing.key | sudo gpg --dearmor -o /etc/apt/keyrings/nginx-archive-keyring.gpg
+  wget -qO - https://nginx.org/keys/nginx_signing.key | sudo gpg --dearmor -o /etc/apt/keyrings/nginx-archive-keyring.gpg
   sudo apt update
   sudo apt install -y nginx
+fi
+
+if [ -f /etc/apt/keyrings/nginx-archive-keyring.gpg ]; then
+  NGINX_KEY_EXPIRED=$(gpg --dry-run --quiet --no-keyring --import --import-options import-show /etc/apt/keyrings/nginx-archive-keyring.gpg | grep -B 1 573BFD6B3D8FBC641079A6ABABF5BD827BD9BF62 | grep expired)
+  if [[ $NGINX_KEY_EXPIRED ]]; then
+    sudo rm -f /etc/apt/keyrings/nginx-archive-keyring.gpg
+    wget -qO - https://nginx.org/keys/nginx_signing.key | sudo gpg --dearmor -o /etc/apt/keyrings/nginx-archive-keyring.gpg
+    sudo apt update
+  fi
 fi
 
 nginxdefaultconf='/etc/nginx/nginx.conf'
@@ -186,7 +226,7 @@ if ! [[ $CHECK_NGINX_NOLIMIT ]]; then
 /' $nginxdefaultconf
 fi
 
-sudo sed -i 's/# server_names_hash_bucket_size.*/server_names_hash_bucket_size 64;/g' $nginxdefaultconf
+sudo sed -i 's/# server_names_hash_bucket_size.*/server_names_hash_bucket_size 256;/g' $nginxdefaultconf
 
 if ! sudo nginx -t >/dev/null 2>&1; then
   sudo nginx -t
@@ -245,7 +285,53 @@ if [ -d ~/.config ]; then
   sudo chown -R $USER:$GROUP ~/.config
 fi
 
+if ! which npm >/dev/null; then
+  sudo apt install -y npm
+fi
+
+# older distros still might not have npm after above command, due to recent changes to node apt packages which replaces nodesource with official node
+# if we still don't have npm, force a switch to nodesource
+if ! which npm >/dev/null; then
+  sudo systemctl stop meshcentral
+  sudo chown ${USER}:${USER} -R /meshcentral
+  sudo apt remove -y nodejs
+  sudo rm -rf /usr/lib/node_modules
+
+  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs
+  sudo npm install -g npm
+
+  cd /meshcentral
+  rm -rf node_modules/ package-lock.json
+  npm install
+  sudo systemctl start meshcentral
+fi
+
 sudo npm install -g npm
+
+CURRENT_MESH_VER=$(cd /meshcentral/node_modules/meshcentral && node -p -e "require('./package.json').version")
+if [[ "${CURRENT_MESH_VER}" != "${LATEST_MESH_VER}" ]] || [[ "$force" = true ]]; then
+  printf >&2 "${GREEN}Updating meshcentral from ${CURRENT_MESH_VER} to ${LATEST_MESH_VER}${NC}\n"
+  sudo systemctl stop meshcentral
+  sudo chown ${USER}:${USER} -R /meshcentral
+  cd /meshcentral
+  rm -rf node_modules/ package.json package-lock.json
+  mesh_pkg="$(
+    cat <<EOF
+{
+  "dependencies": {
+    "archiver": "5.3.1",
+    "meshcentral": "${LATEST_MESH_VER}",
+    "otplib": "10.2.3",
+    "pg": "8.7.1",
+    "pgtools": "0.3.2"
+  }
+}
+EOF
+  )"
+  echo "${mesh_pkg}" >/meshcentral/package.json
+  npm install
+  sudo systemctl start meshcentral
+fi
 
 # update from main repo
 cd /rmm
@@ -294,14 +380,14 @@ if ! [[ $CHECK_CELERY_CONFIG ]]; then
   sed -i 's/CELERYD_OPTS=.*/CELERYD_OPTS="--time-limit=86400 --autoscale=20,2"/g' /etc/conf.d/celery.conf
 fi
 
-CHECK_ADMIN_ENABLED=$(grep ADMIN_ENABLED /rmm/api/tacticalrmm/tacticalrmm/local_settings.py)
+CHECK_ADMIN_ENABLED=$(grep ADMIN_ENABLED $local_settings)
 if ! [[ $CHECK_ADMIN_ENABLED ]]; then
   adminenabled="$(
     cat <<EOF
 ADMIN_ENABLED = False
 EOF
   )"
-  echo "${adminenabled}" | tee --append /rmm/api/tacticalrmm/tacticalrmm/local_settings.py >/dev/null
+  echo "${adminenabled}" | tee --append $local_settings >/dev/null
 fi
 
 if [ "$arch" = "x86_64" ]; then
@@ -338,10 +424,13 @@ if [ ! -d /opt/tactical/reporting/schemas ]; then
   sudo mkdir /opt/tactical/reporting/schemas
 fi
 
+sed -i '/^REDIS_HOST/d' $local_settings
+
 sudo chown -R ${USER}:${USER} /opt/tactical
 
 python manage.py pre_update_tasks
 celery -A tacticalrmm purge -f
+printf >&2 "${GREEN}Running database migrations (this might take a long time)...${NC}\n"
 python manage.py migrate
 python manage.py generate_json_schemas
 python manage.py delete_tokens
@@ -505,31 +594,6 @@ for i in nats nats-api rmm daphne celery celerybeat nginx; do
   printf >&2 "${GREEN}Starting ${i} service${NC}\n"
   sudo systemctl start ${i}
 done
-
-CURRENT_MESH_VER=$(cd /meshcentral/node_modules/meshcentral && node -p -e "require('./package.json').version")
-if [[ "${CURRENT_MESH_VER}" != "${LATEST_MESH_VER}" ]] || [[ "$force" = true ]]; then
-  printf >&2 "${GREEN}Updating meshcentral from ${CURRENT_MESH_VER} to ${LATEST_MESH_VER}${NC}\n"
-  sudo systemctl stop meshcentral
-  sudo chown ${USER}:${USER} -R /meshcentral
-  cd /meshcentral
-  rm -rf node_modules/ package.json package-lock.json
-  mesh_pkg="$(
-    cat <<EOF
-{
-  "dependencies": {
-    "archiver": "5.3.1",
-    "meshcentral": "${LATEST_MESH_VER}",
-    "otplib": "10.2.3",
-    "pg": "8.7.1",
-    "pgtools": "0.3.2"
-  }
-}
-EOF
-  )"
-  echo "${mesh_pkg}" >/meshcentral/package.json
-  npm install
-  sudo systemctl start meshcentral
-fi
 
 rm -f $TMP_SETTINGS
 printf >&2 "${GREEN}Update finished!${NC}\n"
